@@ -1,0 +1,53 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/dikshaWagh/meridian/internal/balancer"
+	"github.com/dikshaWagh/meridian/internal/mockworker"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		return
+	}
+	switch os.Args[1] {
+	case "serve":
+		fs := flag.NewFlagSet("serve", flag.ExitOnError)
+		o := balancer.Options{}
+		fs.StringVar(&o.Host, "host", "0.0.0.0", "balancer bind address")
+		fs.IntVar(&o.Port, "port", 8080, "balancer port")
+		fs.StringVar(&o.ModelsDir, "models-dir", "~/models", "GGUF model directory")
+		fs.StringVar(&o.LlamaBin, "llama-bin", "llama-server", "llama-server binary")
+		fs.IntVar(&o.Threads, "threads", 4, "threads per worker")
+		fs.IntVar(&o.Context, "ctx", 2048, "worker context size")
+		fs.BoolVar(&o.Mock, "mock", false, "use mock workers")
+		fs.Parse(os.Args[2:])
+		if err := balancer.Run(o); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "mock-worker":
+		fs := flag.NewFlagSet("mock-worker", flag.ExitOnError)
+		id := fs.String("id", "w1", "worker id")
+		model := fs.String("model", "qwen2.5-3b", "model")
+		port := fs.Int("port", 8081, "port")
+		pre := fs.Int("prefill-ms", 2, "prefill delay")
+		dec := fs.Int("decode-ms", 20, "decode delay")
+		fs.Parse(os.Args[2:])
+		if err := mockworker.Run(*id, *model, *port, *pre, *dec); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	default:
+		usage()
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: meridian-server <serve|mock-worker> [flags]")
+	os.Exit(2)
+}

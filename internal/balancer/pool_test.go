@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func testPool() *Pool {
@@ -13,6 +14,60 @@ func testPool() *Pool {
 		{ID: "w3", Model: "tinyllama-1.1b", Port: 3},
 		{ID: "w4", Model: "tinyllama-1.1b", Port: 4},
 	})
+}
+
+func TestHealthStateMachine(t *testing.T) {
+	p := testPool()
+	w := p.Workers()[0]
+	w.grace = time.Hour
+	now := time.Now()
+	if w.State() != "starting" {
+		t.Fatalf("initial state: %s", w.State())
+	}
+	w.applyProbe(probeSuccess, now)
+	if !w.IsHealthy() {
+		t.Fatal("successful probe did not make worker healthy")
+	}
+	w.applyProbe(probeFailure, now)
+	w.applyProbe(probeFailure, now)
+	if !w.IsHealthy() {
+		t.Fatal("worker went unhealthy too early")
+	}
+	w.applyProbe(probeFailure, now)
+	if w.State() != "unhealthy" {
+		t.Fatalf("state after third failure: %s", w.State())
+	}
+	w.applyProbe(probeSuccess, now)
+	if !w.IsHealthy() {
+		t.Fatal("worker did not recover")
+	}
+}
+
+func TestExitedWorkerCannotRecover(t *testing.T) {
+	w := testPool().Workers()[0]
+	w.markExited()
+	w.applyProbe(probeSuccess, time.Now())
+	if w.State() != "unhealthy" || w.IsHealthy() {
+		t.Fatal("exited worker recovered")
+	}
+}
+
+func TestStartingGraceAndMessage(t *testing.T) {
+	p := testPool()
+	w := p.Workers()[0]
+	w.grace = time.Second
+	now := w.startedAt
+	w.applyProbe(probeFailure, now.Add(500*time.Millisecond))
+	if w.State() != "starting" {
+		t.Fatal("worker left starting during grace")
+	}
+	w.applyProbe(probeFailure, now.Add(2*time.Second))
+	if w.State() != "unhealthy" {
+		t.Fatal("worker did not leave starting after grace")
+	}
+	if _, err := p.Pick("qwen-0.5b"); !errors.Is(err, ErrNoHealthyWorker) {
+		t.Fatalf("Pick error: %v", err)
+	}
 }
 
 func allHealthy(p *Pool) {

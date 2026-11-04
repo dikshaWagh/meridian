@@ -48,13 +48,18 @@ type ModelList struct {
 }
 
 type WorkerStatus struct {
-	ID       string `json:"id"`
-	Model    string `json:"model"`
-	Port     int    `json:"port"`
-	PID      int    `json:"pid"`
-	Healthy  bool   `json:"healthy"`
-	InFlight int64  `json:"in_flight"`
-	Served   int64  `json:"served"`
+	ID                  string `json:"id"`
+	Model               string `json:"model"`
+	Port                int    `json:"port"`
+	PID                 int    `json:"pid"`
+	State               string `json:"state"`
+	Healthy             bool   `json:"healthy"`
+	InFlight            int64  `json:"in_flight"`
+	Served              int64  `json:"served"`
+	EstTokensInFlight   int64  `json:"est_tokens_in_flight"`
+	ConsecutiveFailures int    `json:"consecutive_failures"`
+	LastCheck           string `json:"last_check"`
+	LastError           string `json:"last_error"`
 }
 
 type StatusResponse struct {

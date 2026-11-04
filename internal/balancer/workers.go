@@ -4,6 +4,7 @@ type WorkerSpec struct {
 	ID        string
 	Model     string
 	Port      int
+	File      string
 	PrefillMS int // simulated ms per input token
 	DecodeMS  int // simulated ms per output token
 }
@@ -11,10 +12,9 @@ type WorkerSpec struct {
 // DefaultWorkers is the hardcoded worker set (static discovery).
 func DefaultWorkers() []WorkerSpec {
 	return []WorkerSpec{
-		{"w1", "qwen-0.5b", 9001, 2, 20},
-		{"w2", "qwen-0.5b", 9002, 2, 20},
-		{"w3", "smollm-360m", 9003, 1, 12},
-		{"w4", "tinyllama-1.1b", 9004, 4, 35},
-		{"w5", "tinyllama-1.1b", 9005, 4, 35},
+		{"w1", "qwen2.5-3b", 8081, "qwen2.5-3b-instruct-q4_k_m.gguf", 2, 20},
+		{"w2", "qwen2.5-3b", 8082, "qwen2.5-3b-instruct-q4_k_m.gguf", 2, 20},
+		{"w3", "llama-3.2-3b", 8083, "llama-3.2-3b-instruct-q4_k_m.gguf", 1, 12},
+		{"w4", "llama-3.2-3b", 8084, "llama-3.2-3b-instruct-q4_k_m.gguf", 1, 12},
 	}
 }
