@@ -25,6 +25,10 @@ func main() {
 		fs.IntVar(&o.Threads, "threads", 4, "threads per worker")
 		fs.IntVar(&o.Context, "ctx", 2048, "worker context size")
 		fs.BoolVar(&o.Mock, "mock", false, "use mock workers")
+		fs.IntVar(&o.NGL, "ngl", 0, "GPU layers per worker (0 = CPU only)")
+		fs.IntVar(&o.GPUWorkers, "gpu-workers", 1, "number of workers to offload to GPU")
+		fs.StringVar(&o.BackendLib, "backend-lib", "", "llama.cpp backend .so (e.g. Vulkan)")
+		fs.StringVar(&o.GPUDevice, "gpu-device", "", "device name, e.g. Vulkan1")
 		fs.Parse(os.Args[2:])
 		if err := balancer.Run(o); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)

@@ -19,13 +19,17 @@ import (
 )
 
 type Options struct {
-	Host      string
-	Port      int
-	ModelsDir string
-	LlamaBin  string
-	Threads   int
-	Context   int
-	Mock      bool
+	Host       string
+	Port       int
+	ModelsDir  string
+	LlamaBin   string
+	Threads    int
+	Context    int
+	Mock       bool
+	NGL        int    // layers offloaded per GPU worker; 0 = CPU only
+	GPUWorkers int    // first N workers get GPU offload
+	BackendLib string // e.g. /usr/local/lib/ollama/vulkan/libggml-vulkan.so
+	GPUDevice  string // e.g. Vulkan1; empty lets llama.cpp choose
 }
 
 func Run(o Options) error {
@@ -77,6 +81,11 @@ func preflight(o Options) error {
 	if _, err := exec.LookPath(o.LlamaBin); err != nil {
 		missing = append(missing, "llama-server binary "+strconv.Quote(o.LlamaBin))
 	}
+	if o.BackendLib != "" {
+		if _, err := os.Stat(o.BackendLib); err != nil {
+			missing = append(missing, o.BackendLib)
+		}
+	}
 	for _, w := range DefaultWorkers() {
 		file := filepath.Join(o.ModelsDir, w.File)
 		if _, err := os.Stat(file); err != nil && !seen[file] {
@@ -93,14 +102,22 @@ func preflight(o Options) error {
 func startChildren(ctx context.Context, pool *Pool, o Options) *sync.WaitGroup {
 	var wg sync.WaitGroup
 	exe, _ := os.Executable()
-	for _, w := range pool.Workers() {
+	for i, w := range pool.Workers() {
 		s := w.Spec
 		var cmd *exec.Cmd
 		if o.Mock {
 			cmd = exec.CommandContext(ctx, exe, "mock-worker", "--id", s.ID, "--model", s.Model, "--port", strconv.Itoa(s.Port), "--prefill-ms", strconv.Itoa(s.PrefillMS), "--decode-ms", strconv.Itoa(s.DecodeMS))
 		} else {
-			cmd = exec.CommandContext(ctx, o.LlamaBin, "-m", filepath.Join(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", "1")
+			args := []string{"-m", filepath.Join(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", "1"}
+			if o.NGL > 0 && i < o.GPUWorkers {
+				args = append(args, "-ngl", strconv.Itoa(o.NGL))
+				if o.GPUDevice != "" {
+					args = append(args, "--device", o.GPUDevice)
+				}
+			}
+			cmd = exec.CommandContext(ctx, o.LlamaBin, args...)
 		}
+		cmd.Env = workerEnv(o)
 		cmd.Cancel = func() error {
 			if cmd.Process == nil {
 				return nil
@@ -129,6 +146,26 @@ func startChildren(ctx context.Context, pool *Pool, o Options) *sync.WaitGroup {
 		}(w, cmd)
 	}
 	return &wg
+}
+
+// workerEnv points llama.cpp at a specific backend (for example Vulkan).
+func workerEnv(o Options) []string {
+	if o.BackendLib == "" {
+		return nil // inherit the parent environment
+	}
+	dir := filepath.Dir(o.BackendLib)
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "GGML_BACKEND_PATH=") || strings.HasPrefix(e, "LD_LIBRARY_PATH=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	ld := dir
+	if old := os.Getenv("LD_LIBRARY_PATH"); old != "" {
+		ld += ":" + old
+	}
+	return append(env, "GGML_BACKEND_PATH="+o.BackendLib, "LD_LIBRARY_PATH="+ld)
 }
 
 func lanURL(port int) string {
