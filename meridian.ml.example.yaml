@@ -1,0 +1,46 @@
+# Meridian ML inference balancer.
+#
+# Only the `ml:` key is read. The LLM balancer keeps its own flags and is not
+# affected by anything in this file.
+#
+#   meridian-server serve --ml-config meridian.ml.example.yaml
+
+ml:
+  # ML HTTP surface. It is a separate listener from the LLM balancer (:8080),
+  # so LLM routing, health and metrics are never touched.
+  listen: "0.0.0.0:8090"
+
+  # Health checking. Health answers "can this worker serve requests?" only.
+  health_interval: 2s      # how often /health (and /ready) are probed
+  startup_grace: 60s       # how long a worker may stay STARTING while loading
+  failure_threshold: 3     # consecutive failures before leaving the candidates
+
+  # Telemetry and proxying.
+  telemetry_interval: 1s   # host CPU/GPU sampling period
+  request_timeout: 120s    # per-inference proxy timeout (504 on expiry)
+
+  # Routing weights. Lower score wins:
+  #   score = latency*latency_score + queue*queue_score
+  #         + gpu*gpu_score + cpu*cpu_score
+  weights:
+    latency: 0.40
+    queue: 0.25
+    gpu: 0.20
+    cpu: 0.15
+
+  # Stage one of routing is the model name: a request for resnet50 only ever
+  # considers resnet50 workers.
+  workers:
+    - {id: resnet-1, model: resnet50, url: "http://127.0.0.1:9001"}
+    - {id: resnet-2, model: resnet50, url: "http://127.0.0.1:9002"}
+    # A CPU-only worker: no GPU data is reported, gpu_score is 0, flagged n/a.
+    - {id: resnet-3, model: resnet50, url: "http://127.0.0.1:9003", gpu: false}
+    - {id: yolov8-1, model: yolov8, url: "http://127.0.0.1:9004", ready_path: /ready}
+
+# Per-worker options:
+#   health_path   default /health
+#   ready_path    optional, probed only when set
+#   predict_path  default /predict
+#   gpu           false for CPU-only workers (default true)
+#   gpu_index     which host GPU to attribute to this worker (default 0)
+#   enabled       false keeps the worker STOPPED and out of routing
