@@ -17,8 +17,9 @@ import (
 )
 
 type requestUsage struct {
-	in, out int
-	ok      bool
+	in, out      int
+	ok           bool
+	assistantMsg *api.Message
 }
 type usageKey struct{}
 
@@ -57,10 +58,9 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, 400, "invalid_request", "model is required")
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewReader(raw))
-	r.ContentLength = int64(len(raw))
-	est := tokens.ForRequest(req)
-	worker, err := pool.Pick(req.Model)
+
+	convID := strings.TrimSpace(r.Header.Get("X-Conversation-ID"))
+	worker, sess, err := pool.PickForSession(req.Model, convID)
 	if errors.Is(err, ErrModelNotFound) {
 		api.WriteError(w, 404, "model_not_found", "unknown model "+strconv.Quote(req.Model))
 		return
@@ -73,26 +73,89 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, 503, "no_healthy_worker", msg)
 		return
 	}
+	if errors.Is(err, ErrModelMismatch) {
+		api.WriteError(w, 400, "model_mismatch", "conversation is bound to a different model")
+		return
+	}
 	if err != nil {
 		api.WriteError(w, 500, "internal_error", err.Error())
 		return
 	}
+
+	upstreamReq := req
+	if convID != "" && sess != nil {
+		sess.mu.Lock()
+		if sess.inFlight {
+			sess.mu.Unlock()
+			api.WriteError(w, 409, "conversation_busy", "conversation is busy")
+			return
+		}
+		sess.inFlight = true
+		sess.LastUsed = time.Now()
+
+		history := make([]api.Message, len(sess.Messages))
+		copy(history, sess.Messages)
+		sess.mu.Unlock()
+
+		defer func() {
+			sess.mu.Lock()
+			sess.inFlight = false
+			sess.LastUsed = time.Now()
+			sess.mu.Unlock()
+		}()
+
+		upstreamReq.Messages = append(history, req.Messages...)
+	}
+
+	est := tokens.ForRequest(upstreamReq)
+
+	if convID != "" && sess != nil {
+		perConvCtx := pool.PerConvContext()
+		if perConvCtx > 0 && (est.Input > perConvCtx || est.Total > perConvCtx) {
+			api.WriteError(w, 413, "context_too_long", "prompt exceeds per-conversation context limit")
+			return
+		}
+
+		upstreamRaw, err := json.Marshal(upstreamReq)
+		if err != nil {
+			api.WriteError(w, 500, "internal_error", "failed to marshal request")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(upstreamRaw))
+		r.ContentLength = int64(len(upstreamRaw))
+	} else {
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		r.ContentLength = int64(len(raw))
+	}
+
 	w.Header().Set("X-Meridian-Worker", worker.Spec.ID)
 	w.Header().Set("X-Meridian-Model", req.Model)
 	w.Header().Set("X-Meridian-Est-Input-Tokens", strconv.Itoa(est.Input))
 	w.Header().Set("X-Meridian-Est-Output-Tokens", strconv.Itoa(est.Output))
 	w.Header().Set("X-Meridian-Est-Total-Tokens", strconv.Itoa(est.Total))
+
 	worker.InFlight.Add(1)
 	worker.EstTokensInFlight.Add(int64(est.Total))
 	defer worker.InFlight.Add(-1)
 	defer worker.EstTokensInFlight.Add(-int64(est.Total))
+
 	usage := &requestUsage{}
 	r = r.WithContext(context.WithValue(r.Context(), usageKey{}, usage))
 	rec := &statusRecorder{ResponseWriter: w, status: 200}
+
 	worker.Proxy.ServeHTTP(rec, r)
+
 	if rec.status < 500 {
 		worker.Served.Add(1)
 	}
+
+	if convID != "" && sess != nil && rec.status == 200 && r.Context().Err() == nil && usage.assistantMsg != nil {
+		sess.mu.Lock()
+		sess.Messages = append(sess.Messages, req.Messages...)
+		sess.Messages = append(sess.Messages, *usage.assistantMsg)
+		sess.mu.Unlock()
+	}
+
 	actIn, actOut := "?", "?"
 	if usage.ok {
 		actIn = strconv.Itoa(usage.in)
@@ -117,6 +180,10 @@ func captureUsage(resp *http.Response, usage *requestUsage) error {
 		usage.in = result.Usage.PromptTokens
 		usage.out = result.Usage.CompletionTokens
 		usage.ok = true
+		if len(result.Choices) > 0 {
+			msg := result.Choices[0].Message
+			usage.assistantMsg = &msg
+		}
 	}
 	return nil
 }
@@ -129,5 +196,8 @@ func handleModels(pool *Pool, w http.ResponseWriter) {
 	api.WriteJSON(w, 200, list)
 }
 func handleStatus(pool *Pool, w http.ResponseWriter) {
-	api.WriteJSON(w, 200, api.StatusResponse{Workers: pool.Snapshot()})
+	api.WriteJSON(w, 200, api.StatusResponse{
+		Workers:      pool.Snapshot(),
+		SessionCount: pool.SessionStore().TotalCount(),
+	})
 }

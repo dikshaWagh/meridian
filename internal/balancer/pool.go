@@ -19,6 +19,7 @@ import (
 var (
 	ErrModelNotFound   = errors.New("model not found")
 	ErrNoHealthyWorker = errors.New("no healthy worker")
+	ErrModelMismatch   = errors.New("model mismatch for session")
 )
 
 const (
@@ -54,13 +55,21 @@ type Worker struct {
 }
 
 type Pool struct {
-	workers []*Worker
-	mu      sync.Mutex
-	rr      map[string]int
+	workers  []*Worker
+	mu       sync.Mutex
+	rr       map[string]int
+	store    *SessionStore
+	ctxSize  int
+	parallel int
 }
 
 func NewPool(specs []WorkerSpec) *Pool {
-	p := &Pool{rr: map[string]int{}}
+	p := &Pool{
+		rr:       map[string]int{},
+		store:    NewSessionStore(),
+		ctxSize:  8192,
+		parallel: 2,
+	}
 	for _, s := range specs {
 		u := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", s.Port)}
 		proxy := httputil.NewSingleHostReverseProxy(u)
@@ -208,8 +217,101 @@ func (p *Pool) Models() []string {
 	return out
 }
 
+func (p *Pool) SessionStore() *SessionStore { return p.store }
+
+func (p *Pool) SetContextAndParallel(ctxSize, parallel int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ctxSize > 0 {
+		p.ctxSize = ctxSize
+	}
+	if parallel > 0 {
+		p.parallel = parallel
+	}
+}
+
+func (p *Pool) PerConvContext() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.parallel <= 0 {
+		return p.ctxSize
+	}
+	return p.ctxSize / p.parallel
+}
+
+func (p *Pool) WorkerByID(id string) *Worker {
+	for _, w := range p.workers {
+		if w.Spec.ID == id {
+			return w
+		}
+	}
+	return nil
+}
+
+func (p *Pool) PickForSession(model, convID string) (*Worker, *Session, error) {
+	if convID == "" {
+		w, err := p.Pick(model)
+		return w, nil, err
+	}
+
+	sess, ok := p.store.Get(convID)
+	if !ok {
+		w, err := p.Pick(model)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// Create atomically: two concurrent first requests for the same ID must
+		// share one Session so one of them can be rejected with 409.
+		var created bool
+		sess, created = p.store.CreateIfAbsent(convID, model, w.Spec.ID)
+		if created {
+			return w, sess, nil
+		}
+		// Lost the race; fall through and re-evaluate the existing session.
+	}
+
+	sess.mu.Lock()
+	sessModel := sess.Model
+	pinnedWorkerID := sess.WorkerID
+	sess.mu.Unlock()
+
+	if sessModel != model {
+		return nil, nil, ErrModelMismatch
+	}
+
+	w := p.WorkerByID(pinnedWorkerID)
+	if w != nil && w.IsHealthy() {
+		return w, sess, nil
+	}
+
+	// Pinned worker is starting/unhealthy/exited -> move
+	w, err := p.Pick(model)
+	if err != nil {
+		return nil, sess, err
+	}
+
+	sess.mu.Lock()
+	oldWorkerID := sess.WorkerID
+	sess.WorkerID = w.Spec.ID
+	sess.mu.Unlock()
+
+	reason := "worker unhealthy"
+	if wOld := p.WorkerByID(oldWorkerID); wOld != nil {
+		if wOld.exited.Load() {
+			reason = "worker process exited"
+		} else if wOld.State() == "starting" {
+			reason = "worker starting"
+		}
+	}
+
+	log.Printf("session %s moved %s -> %s (reason: %s)", convID, oldWorkerID, w.Spec.ID, reason)
+	return w, sess, nil
+}
+
 func (p *Pool) Snapshot() []api.WorkerStatus {
 	out := make([]api.WorkerStatus, 0, len(p.workers))
+	counts := p.store.SessionCountPerWorker()
 	for _, w := range p.workers {
 		w.mu.RLock()
 		check, lastErr := w.lastCheck, w.lastError
@@ -218,9 +320,38 @@ func (p *Pool) Snapshot() []api.WorkerStatus {
 		if !check.IsZero() {
 			lastCheck = check.UTC().Format(time.RFC3339)
 		}
-		out = append(out, api.WorkerStatus{ID: w.Spec.ID, Model: w.Spec.Model, Port: w.Spec.Port, PID: int(w.PID.Load()), State: w.State(), Healthy: w.IsHealthy(), InFlight: w.InFlight.Load(), Served: w.Served.Load(), EstTokensInFlight: w.EstTokensInFlight.Load(), ConsecutiveFailures: int(w.consecutiveFailures.Load()), LastCheck: lastCheck, LastError: lastErr})
+		out = append(out, api.WorkerStatus{
+			ID:                  w.Spec.ID,
+			Model:               w.Spec.Model,
+			Port:                w.Spec.Port,
+			PID:                 int(w.PID.Load()),
+			State:               w.State(),
+			Healthy:             w.IsHealthy(),
+			InFlight:            w.InFlight.Load(),
+			Served:              w.Served.Load(),
+			EstTokensInFlight:   w.EstTokensInFlight.Load(),
+			ConsecutiveFailures: int(w.consecutiveFailures.Load()),
+			LastCheck:           lastCheck,
+			LastError:           lastErr,
+			Sessions:            counts[w.Spec.ID],
+		})
 	}
 	return out
+}
+
+func (p *Pool) StartSessionSweeper(ctx context.Context) {
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				p.store.Sweep()
+			}
+		}
+	}()
 }
 
 func (p *Pool) StartHealthChecks(ctx context.Context) {

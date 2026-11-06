@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"github.com/dikshaWagh/meridian/internal/api"
@@ -19,10 +20,25 @@ type session struct {
 	in        *bufio.Scanner
 	current   string
 	maxTokens int
+	convID    string
+}
+
+func newUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
 func Chat(addr string, maxTokens int) error {
-	s := &session{addr: strings.TrimRight(addr, "/"), client: &http.Client{Timeout: 300 * time.Second}, in: bufio.NewScanner(os.Stdin), maxTokens: maxTokens}
+	s := &session{
+		addr:      strings.TrimRight(addr, "/"),
+		client:    &http.Client{Timeout: 300 * time.Second},
+		in:        bufio.NewScanner(os.Stdin),
+		maxTokens: maxTokens,
+		convID:    newUUID(),
+	}
 	printBanner()
 	if _, e := s.healthz(); e != nil {
 		fmt.Println(Red("✗ cannot reach balancer at " + s.addr))
@@ -61,7 +77,7 @@ func Chat(addr string, maxTokens int) error {
 func printBanner() {
 	fmt.Println(Cyan("╭──────────────────────────────╮"))
 	fmt.Println(Cyan("│ ") + Bold(Cyan("        MERIDIAN")) + Cyan("             │"))
-	fmt.Println(Cyan("│ ") + Dim(" LLM load balancer · v1") + Cyan("      │"))
+	fmt.Println(Cyan("│ ") + Dim(" LLM load balancer · v1.1") + Cyan("   │"))
 	fmt.Println(Cyan("╰──────────────────────────────╯"))
 	fmt.Println(Dim("type /help for commands"))
 	fmt.Println()
@@ -125,6 +141,7 @@ func (s *session) pickModel(ms []string) bool {
 		}
 		if m, ok := resolve(s.in.Text(), ms); ok {
 			s.current = m
+			s.convID = newUUID()
 			return true
 		}
 		fmt.Println(Yellow("invalid choice, try again"))
@@ -136,7 +153,10 @@ func (s *session) command(text string) bool {
 	case "/quit", "/exit":
 		return false
 	case "/help":
-		fmt.Println("/models  /model <name|number>  /status  /quit")
+		fmt.Println("/models  /model <name|number>  /new  /status  /quit")
+	case "/new":
+		s.convID = newUUID()
+		fmt.Println(Dim("Started new conversation."))
 	case "/models":
 		ms, e := s.fetchModels()
 		if e != nil {
@@ -155,6 +175,7 @@ func (s *session) command(text string) bool {
 		if e == nil {
 			if m, ok := resolve(f[1], ms); ok {
 				s.current = m
+				s.convID = newUUID()
 			} else {
 				fmt.Println(Yellow("unknown model"))
 			}
@@ -173,7 +194,16 @@ func (s *session) send(text string) {
 	}
 	body, _ := json.Marshal(api.ChatRequest{Model: s.current, Messages: []api.Message{{Role: "user", Content: text}}, MaxTokens: s.maxTokens})
 	start := time.Now()
-	r, e := s.client.Post(s.addr+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	req, e := http.NewRequest("POST", s.addr+"/v1/chat/completions", bytes.NewReader(body))
+	if e != nil {
+		fmt.Println(Red("  ✗ " + e.Error()))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.convID != "" {
+		req.Header.Set("X-Conversation-ID", s.convID)
+	}
+	r, e := s.client.Do(req)
 	if e != nil {
 		fmt.Println(Red("  ✗ " + e.Error()))
 		return
@@ -182,6 +212,16 @@ func (s *session) send(text string) {
 	if r.StatusCode != 200 {
 		var x api.ErrorBody
 		_ = json.NewDecoder(r.Body).Decode(&x)
+		if x.Error.Type == "model_mismatch" {
+			// A session is bound to one model; start a fresh conversation.
+			s.convID = newUUID()
+			fmt.Println(Red("  ✗ "+x.Error.Message) + Dim(" (started a new conversation)"))
+			return
+		}
+		if x.Error.Type == "context_too_long" {
+			fmt.Println(Red("  ✗ "+x.Error.Message) + Dim(" (use /new to start a fresh conversation)"))
+			return
+		}
 		fmt.Println(Red("  ✗ " + x.Error.Message))
 		return
 	}
@@ -207,7 +247,7 @@ func (s *session) status() {
 	if json.NewDecoder(r.Body).Decode(&st) != nil {
 		return
 	}
-	fmt.Println(Bold(fmt.Sprintf("%-4s%-16s%-6s%-8s%-12s%-10s%-8s%-8s", "ID", "MODEL", "PORT", "PID", "STATE", "IN-FLIGHT", "EST-TOK", "SERVED")))
+	fmt.Println(Bold(fmt.Sprintf("%-4s%-16s%-6s%-8s%-12s%-10s%-8s%-8s%-10s", "ID", "MODEL", "PORT", "PID", "STATE", "IN-FLIGHT", "EST-TOK", "SERVED", "SESSIONS")))
 	for _, w := range st.Workers {
 		plainState := "● unhealthy"
 		if w.State == "healthy" {
@@ -223,7 +263,7 @@ func (s *session) status() {
 		} else {
 			state = Red(plainState)
 		}
-		fmt.Printf("%-4s%-16s%-6d%-8d%s%-10d%-8d%-8d\n", w.ID, w.Model, w.Port, w.PID, padColor(state, plainState, 12), w.InFlight, w.EstTokensInFlight, w.Served)
+		fmt.Printf("%-4s%-16s%-6d%-8d%s%-10d%-8d%-8d%-10d\n", w.ID, w.Model, w.Port, w.PID, padColor(state, plainState, 12), w.InFlight, w.EstTokensInFlight, w.Served, w.Sessions)
 	}
 }
 

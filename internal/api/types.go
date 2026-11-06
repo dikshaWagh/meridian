@@ -60,10 +60,12 @@ type WorkerStatus struct {
 	ConsecutiveFailures int    `json:"consecutive_failures"`
 	LastCheck           string `json:"last_check"`
 	LastError           string `json:"last_error"`
+	Sessions            int    `json:"sessions"`
 }
 
 type StatusResponse struct {
-	Workers []WorkerStatus `json:"workers"`
+	Workers      []WorkerStatus `json:"workers"`
+	SessionCount int            `json:"sessionCount"`
 }
 
 type ErrorBody struct {

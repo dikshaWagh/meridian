@@ -25,6 +25,7 @@ type Options struct {
 	LlamaBin   string
 	Threads    int
 	Context    int
+	Parallel   int
 	Mock       bool
 	NGL        int    // layers offloaded per GPU worker; 0 = CPU only
 	GPUWorkers int    // first N workers get GPU offload
@@ -33,6 +34,12 @@ type Options struct {
 }
 
 func Run(o Options) error {
+	if o.Parallel <= 0 {
+		o.Parallel = 2
+	}
+	if o.Context <= 0 {
+		o.Context = 8192
+	}
 	if o.ModelsDir, _ = expandHome(o.ModelsDir); !o.Mock {
 		if err := preflight(o); err != nil {
 			return err
@@ -41,8 +48,10 @@ func Run(o Options) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	pool := NewPool(DefaultWorkers())
+	pool.SetContextAndParallel(o.Context, o.Parallel)
 	children := startChildren(ctx, pool, o)
 	pool.StartHealthChecks(ctx)
+	pool.StartSessionSweeper(ctx)
 	srv := &http.Server{Addr: fmt.Sprintf("%s:%d", o.Host, o.Port), Handler: NewHandler(pool), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -108,7 +117,7 @@ func startChildren(ctx context.Context, pool *Pool, o Options) *sync.WaitGroup {
 		if o.Mock {
 			cmd = exec.CommandContext(ctx, exe, "mock-worker", "--id", s.ID, "--model", s.Model, "--port", strconv.Itoa(s.Port), "--prefill-ms", strconv.Itoa(s.PrefillMS), "--decode-ms", strconv.Itoa(s.DecodeMS))
 		} else {
-			args := []string{"-m", filepath.Join(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", "1"}
+			args := []string{"-m", filepath.Join(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", strconv.Itoa(o.Parallel)}
 			if o.NGL > 0 && i < o.GPUWorkers {
 				args = append(args, "-ngl", strconv.Itoa(o.NGL))
 				if o.GPUDevice != "" {
