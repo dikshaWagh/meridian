@@ -1,0 +1,51 @@
+:root {
+  color-scheme: light;
+
+  /* Technical-drawing palette: flat light planes, charcoal linework, one orange. */
+  --bg: #f2f2f2;
+  --panel: #f8f8f8;
+  --panel-alt: #ebebeb;
+  --surface: var(--panel);
+  --surface-alt: var(--panel-alt);
+  --surface-strong: #ffffff;
+
+  --line: #333333;
+  --line-strong: #222222;
+  --line-faint: rgba(0, 0, 0, 0.12);
+  --border: var(--line);
+  --border-strong: var(--line-strong);
+  --border-faint: var(--line-faint);
+
+  --text: #222222;
+  /* #666 instead of #6B6B6B keeps small dim text at AA on the #EBEBEB plane. */
+  --text-dim: #666666;
+
+  --accent: #e8581c;
+  --accent-ink: #c2410c;
+  --mock: #3c5a7a;
+
+  /* Chart series stay in the ink / orange / slate family. */
+  --cyan: #e8581c;
+  --purple: #3c5a7a;
+  --teal: #8a8a8a;
+  --blue: #c2410c;
+
+  --ok: #1f6b45;
+  --warn: #7a5200;
+  --bad: #b42318;
+
+  --accent-soft: rgba(232, 88, 28, 0.04);
+  --mock-soft: rgba(60, 90, 122, 0.07);
+  --ok-soft: rgba(31, 107, 69, 0.08);
+  --warn-soft: rgba(122, 82, 0, 0.06);
+  --bad-soft: rgba(180, 35, 24, 0.06);
+  --cyan-soft: var(--accent-soft);
+  --purple-soft: var(--mock-soft);
+
+  --font-sans: 'Geist Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+
+  --radius: 0px;
+  --shadow-panel: none;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
