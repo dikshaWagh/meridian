@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dikshaWagh/meridian/internal/api"
+	"github.com/dikshaWagh/meridian/internal/metrics"
 	"github.com/dikshaWagh/meridian/internal/tokens"
 )
 
@@ -37,19 +38,57 @@ func NewHandler(pool *Pool) http.Handler {
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	wrote  bool
 }
 
-func (s *statusRecorder) WriteHeader(code int)        { s.status = code; s.ResponseWriter.WriteHeader(code) }
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.wrote {
+		return
+	}
+	s.status = code
+	s.wrote = true
+	s.ResponseWriter.WriteHeader(code)
+}
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	rec := &statusRecorder{ResponseWriter: w, status: 200}
+	w = rec
+	requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = metrics.NewRequestID()
+	}
+	var req api.ChatRequest
+	convID := strings.TrimSpace(r.Header.Get("X-Conversation-ID"))
+	workerID := ""
+	est := tokens.Estimate{}
+	usage := &requestUsage{}
+	defer func() {
+		entry := metrics.RequestLog{
+			Timestamp:       time.Now().UTC().Format(time.RFC3339),
+			RequestID:       requestID,
+			Model:           req.Model,
+			WorkerID:        workerID,
+			ConversationID:  convID,
+			StatusCode:      rec.status,
+			LatencyMS:       time.Since(start).Milliseconds(),
+			EstInputTokens:  est.Input,
+			EstOutputTokens: est.Output,
+			EstTotalTokens:  est.Total,
+		}
+		if usage.ok {
+			entry.ActualPromptTokens = usage.in
+			entry.ActualCompletionTokens = usage.out
+		}
+		metrics.AppendRequest(entry)
+	}()
+
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		api.WriteError(w, 400, "invalid_request", "could not read body (max 1 MiB)")
 		return
 	}
-	var req api.ChatRequest
 	if json.Unmarshal(raw, &req) != nil {
 		api.WriteError(w, 400, "invalid_request", "body is not valid JSON")
 		return
@@ -59,7 +98,6 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	convID := strings.TrimSpace(r.Header.Get("X-Conversation-ID"))
 	worker, sess, err := pool.PickForSession(req.Model, convID)
 	if errors.Is(err, ErrModelNotFound) {
 		api.WriteError(w, 404, "model_not_found", "unknown model "+strconv.Quote(req.Model))
@@ -81,6 +119,7 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, 500, "internal_error", err.Error())
 		return
 	}
+	workerID = worker.Spec.ID
 
 	upstreamReq := req
 	if convID != "" && sess != nil {
@@ -107,7 +146,7 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		upstreamReq.Messages = append(history, req.Messages...)
 	}
 
-	est := tokens.ForRequest(upstreamReq)
+	est = tokens.ForRequest(upstreamReq)
 
 	if convID != "" && sess != nil {
 		perConvCtx := pool.PerConvContext()
@@ -139,11 +178,9 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	defer worker.InFlight.Add(-1)
 	defer worker.EstTokensInFlight.Add(-int64(est.Total))
 
-	usage := &requestUsage{}
 	r = r.WithContext(context.WithValue(r.Context(), usageKey{}, usage))
-	rec := &statusRecorder{ResponseWriter: w, status: 200}
 
-	worker.Proxy.ServeHTTP(rec, r)
+	worker.Proxy.ServeHTTP(w, r)
 
 	if rec.status < 500 {
 		worker.Served.Add(1)
