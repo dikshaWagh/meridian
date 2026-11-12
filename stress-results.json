@@ -1,0 +1,40 @@
+{
+  "models_count": 3,
+  "conversations_per_model": 20,
+  "conversations_total": 60,
+  "concurrency": 6,
+  "requests_sent": 150,
+  "succeeded": 145,
+  "failed": 5,
+  "success_percent": 96.66666666666667,
+  "failure_percent": 3.3333333333333335,
+  "failures_by_status": {
+    "0": 3,
+    "413": 2
+  },
+  "latency_successful_ms": {
+    "p50": 35315,
+    "p95": 234490,
+    "p99": 276269
+  },
+  "latency_by_turn_index_ms": {
+    "1": {
+      "p50": 36251,
+      "p95": 272083,
+      "p99": 280820
+    },
+    "2": {
+      "p50": 51202,
+      "p95": 225349,
+      "p99": 276269
+    },
+    "3": {
+      "p50": 18735,
+      "p95": 237425,
+      "p99": 244634
+    }
+  },
+  "requests_per_second": 0.07120318662445292,
+  "tokens_per_second": 25.60073745847744,
+  "run_duration_seconds": 2036.425711742
+}

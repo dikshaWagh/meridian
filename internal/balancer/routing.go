@@ -58,5 +58,6 @@ func (p *RoundRobinPolicy) Pick(model string, healthy []*Worker) *Worker {
 func newRoutingPolicies() []RoutingPolicy {
 	return []RoutingPolicy{
 		NewRoundRobinPolicy(),
+		&RandomPolicy{}, 
 	}
 }

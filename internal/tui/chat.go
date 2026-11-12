@@ -21,6 +21,7 @@ type session struct {
 	current   string
 	maxTokens int
 	convID    string
+	policy    string
 }
 
 func newUUID() string {
@@ -118,6 +119,49 @@ func (s *session) fetchModels() ([]string, error) {
 	}
 	return o, nil
 }
+func (s *session) fetchPolicies() (api.RoutingPolicyList, error) {
+	var list api.RoutingPolicyList
+	r, e := s.client.Get(s.addr + "/policies")
+	if e != nil {
+		return list, e
+	}
+	defer r.Body.Close()
+	e = json.NewDecoder(r.Body).Decode(&list)
+	return list, e
+}
+func (s *session) policyCommand(args []string) {
+	list, e := s.fetchPolicies()
+	if e != nil {
+		fmt.Println(Red(e.Error()))
+		return
+	}
+	current := s.policy
+	if current == "" {
+		current = list.Default
+	}
+	if len(args) == 0 {
+		fmt.Println(Bold("Routing policies (current: " + current + "):"))
+		for i, p := range list.Policies {
+			mark := " "
+			if p.Name == current {
+				mark = "*"
+			}
+			fmt.Printf("  %s %s %s %s\n", mark, Cyan(strconv.Itoa(i+1)+"."), p.Name, Dim(p.Description))
+		}
+		fmt.Println(Dim("usage: /policy <name|number>"))
+		return
+	}
+	for i, p := range list.Policies {
+		if args[0] == p.Name || args[0] == strconv.Itoa(i+1) {
+			s.policy = p.Name
+			// Sessions pin a worker, so start fresh for the new policy to apply.
+			s.convID = newUUID()
+			fmt.Println(Dim("Routing policy set to " + p.Name + " (started a new conversation)"))
+			return
+		}
+	}
+	fmt.Println(Yellow("unknown routing policy"))
+}
 func resolve(in string, ms []string) (string, bool) {
 	if n, e := strconv.Atoi(strings.TrimSpace(in)); e == nil && n > 0 && n <= len(ms) {
 		return ms[n-1], true
@@ -153,7 +197,7 @@ func (s *session) command(text string) bool {
 	case "/quit", "/exit":
 		return false
 	case "/help":
-		fmt.Println("/models  /model <name|number>  /new  /status  /quit")
+		fmt.Println("/models  /model <name|number>  /policy [name|number]  /new  /status  /quit")
 	case "/new":
 		s.convID = newUUID()
 		fmt.Println(Dim("Started new conversation."))
@@ -180,6 +224,8 @@ func (s *session) command(text string) bool {
 				fmt.Println(Yellow("unknown model"))
 			}
 		}
+	case "/policy":
+		s.policyCommand(f[1:])
 	case "/status":
 		s.status()
 	default:
@@ -202,6 +248,9 @@ func (s *session) send(text string) {
 	req.Header.Set("Content-Type", "application/json")
 	if s.convID != "" {
 		req.Header.Set("X-Conversation-ID", s.convID)
+	}
+	if s.policy != "" {
+		req.Header.Set("X-Meridian-Routing-Policy", s.policy)
 	}
 	r, e := s.client.Do(req)
 	if e != nil {
