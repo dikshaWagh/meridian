@@ -100,7 +100,7 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	worker, sess, err := pool.PickForSessionWithPolicy(req.Model, convID, policyName)
+	worker, sess, reservation, err := pool.PickForSessionWithPolicyReserved(req.Model, convID, policyName)
 	if errors.Is(err, ErrUnknownRoutingPolicy) {
 		api.WriteError(w, 400, "unknown_routing_policy", err.Error())
 		return
@@ -125,6 +125,8 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, 500, "internal_error", err.Error())
 		return
 	}
+	// Release the reservation if the request fails before proxying.
+	defer reservation.Release()
 	workerID = worker.Spec.ID
 
 	usedPolicy := policyName
@@ -185,9 +187,9 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Meridian-Est-Output-Tokens", strconv.Itoa(est.Output))
 	w.Header().Set("X-Meridian-Est-Total-Tokens", strconv.Itoa(est.Total))
 
-	worker.InFlight.Add(1)
-	worker.EstTokensInFlight.Add(int64(est.Total))
+	reservation.Commit()
 	defer worker.InFlight.Add(-1)
+	worker.EstTokensInFlight.Add(int64(est.Total))
 	defer worker.EstTokensInFlight.Add(-int64(est.Total))
 
 	r = r.WithContext(context.WithValue(r.Context(), usageKey{}, usage))

@@ -59,5 +59,6 @@ func newRoutingPolicies() []RoutingPolicy {
 	return []RoutingPolicy{
 		NewRoundRobinPolicy(),
 		&RandomPolicy{}, 
+		&LeastConnectionsPolicy{},
 	}
 }

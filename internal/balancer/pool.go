@@ -44,6 +44,7 @@ type Worker struct {
 	PID                 atomic.Int64
 	state               atomic.Int32
 	InFlight            atomic.Int64
+	Reserved            atomic.Int64
 	EstTokensInFlight   atomic.Int64
 	Served              atomic.Int64
 	consecutiveFailures atomic.Int32
@@ -55,9 +56,47 @@ type Worker struct {
 	lastError           string
 }
 
+// Load is the number of requests assigned to the worker. It includes requests
+// that have been selected but have not started proxying yet.
+func (w *Worker) Load() int64 {
+	return w.InFlight.Load() + w.Reserved.Load()
+}
+
+// WorkerReservation holds a worker slot between selection and proxying.
+// Call Commit when the request starts proxying, or Release if it never does.
+type WorkerReservation struct {
+	worker *Worker
+	once   sync.Once
+}
+
+func (r *WorkerReservation) Commit() {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		r.worker.Reserved.Add(-1)
+		r.worker.InFlight.Add(1)
+	})
+}
+
+func (r *WorkerReservation) Release() {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		r.worker.Reserved.Add(-1)
+	})
+}
+
+func reserveWorker(w *Worker) *WorkerReservation {
+	w.Reserved.Add(1)
+	return &WorkerReservation{worker: w}
+}
+
 type Pool struct {
 	workers       []*Worker
 	mu            sync.Mutex
+	pickMu        sync.Mutex
 	policies      map[string]RoutingPolicy
 	defaultPolicy string
 	store         *SessionStore
@@ -219,6 +258,18 @@ func (p *Pool) pickWith(policy RoutingPolicy, model string) (*Worker, error) {
 	return w, nil
 }
 
+// reservePick selects a worker and reserves it in one critical section, so
+// concurrent selections cannot all choose the same least-loaded worker.
+func (p *Pool) reservePick(policy RoutingPolicy, model string) (*Worker, *WorkerReservation, error) {
+	p.pickMu.Lock()
+	defer p.pickMu.Unlock()
+	w, err := p.pickWith(policy, model)
+	if err != nil {
+		return nil, nil, err
+	}
+	return w, reserveWorker(w), nil
+}
+
 func (p *Pool) routingPolicy(name string) (RoutingPolicy, error) {
 	if name == "" {
 		p.mu.Lock()
@@ -323,20 +374,41 @@ func (p *Pool) PickForSession(model, convID string) (*Worker, *Session, error) {
 // PickForSessionWithPolicy is like PickForSession but uses the named routing
 // policy when a worker has to be chosen (new conversation or worker move).
 func (p *Pool) PickForSessionWithPolicy(model, convID, policyName string) (*Worker, *Session, error) {
+	w, sess, _, err := p.pickForSession(model, convID, policyName, false)
+	return w, sess, err
+}
+
+// PickForSessionWithPolicyReserved is like PickForSessionWithPolicy, but also
+// reserves the selected worker until Commit or Release is called. This makes
+// policies such as least-connections safe under concurrent requests.
+func (p *Pool) PickForSessionWithPolicyReserved(model, convID, policyName string) (*Worker, *Session, *WorkerReservation, error) {
+	return p.pickForSession(model, convID, policyName, true)
+}
+
+func (p *Pool) pickForSession(model, convID, policyName string, reserve bool) (*Worker, *Session, *WorkerReservation, error) {
 	policy, err := p.routingPolicy(policyName)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	if convID == "" {
+
+	pick := func() (*Worker, *WorkerReservation, error) {
+		if reserve {
+			return p.reservePick(policy, model)
+		}
 		w, err := p.pickWith(policy, model)
 		return w, nil, err
 	}
 
+	if convID == "" {
+		w, r, err := pick()
+		return w, nil, r, err
+	}
+
 	sess, ok := p.store.Get(convID)
 	if !ok {
-		w, err := p.pickWith(policy, model)
+		w, r, err := pick()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		// Create atomically: two concurrent first requests for the same ID must
@@ -344,9 +416,10 @@ func (p *Pool) PickForSessionWithPolicy(model, convID, policyName string) (*Work
 		var created bool
 		sess, created = p.store.CreateIfAbsent(convID, model, w.Spec.ID)
 		if created {
-			return w, sess, nil
+			return w, sess, r, nil
 		}
-		// Lost the race; fall through and re-evaluate the existing session.
+		// Lost the race; discard the reservation and re-evaluate the session.
+		r.Release()
 	}
 
 	sess.mu.Lock()
@@ -355,18 +428,22 @@ func (p *Pool) PickForSessionWithPolicy(model, convID, policyName string) (*Work
 	sess.mu.Unlock()
 
 	if sessModel != model {
-		return nil, nil, ErrModelMismatch
+		return nil, nil, nil, ErrModelMismatch
 	}
 
 	w := p.WorkerByID(pinnedWorkerID)
 	if w != nil && w.IsHealthy() {
-		return w, sess, nil
+		var r *WorkerReservation
+		if reserve {
+			r = reserveWorker(w)
+		}
+		return w, sess, r, nil
 	}
 
 	// Pinned worker is starting/unhealthy/exited -> move
-	w, err = p.pickWith(policy, model)
+	w, r, err := pick()
 	if err != nil {
-		return nil, sess, err
+		return nil, sess, nil, err
 	}
 
 	sess.mu.Lock()
@@ -384,7 +461,7 @@ func (p *Pool) PickForSessionWithPolicy(model, convID, policyName string) (*Work
 	}
 
 	log.Printf("session %s moved %s -> %s (reason: %s)", convID, oldWorkerID, w.Spec.ID, reason)
-	return w, sess, nil
+	return w, sess, r, nil
 }
 
 func (p *Pool) Snapshot() []api.WorkerStatus {
