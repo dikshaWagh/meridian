@@ -30,6 +30,7 @@ func main() {
 		fs.IntVar(&o.GPUWorkers, "gpu-workers", 1, "number of workers to offload to GPU")
 		fs.StringVar(&o.BackendLib, "backend-lib", "", "llama.cpp backend .so (e.g. Vulkan)")
 		fs.StringVar(&o.GPUDevice, "gpu-device", "", "device name, e.g. Vulkan1")
+		fs.StringVar(&o.RoutingPolicy, "routing-policy", "round-robin", "default routing policy (see /policies)")
 		fs.Parse(os.Args[2:])
 		if err := balancer.Run(o); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)

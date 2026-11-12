@@ -17,9 +17,10 @@ import (
 )
 
 var (
-	ErrModelNotFound   = errors.New("model not found")
-	ErrNoHealthyWorker = errors.New("no healthy worker")
-	ErrModelMismatch   = errors.New("model mismatch for session")
+	ErrModelNotFound        = errors.New("model not found")
+	ErrNoHealthyWorker      = errors.New("no healthy worker")
+	ErrModelMismatch        = errors.New("model mismatch for session")
+	ErrUnknownRoutingPolicy = errors.New("unknown routing policy")
 )
 
 const (
@@ -55,20 +56,27 @@ type Worker struct {
 }
 
 type Pool struct {
-	workers  []*Worker
-	mu       sync.Mutex
-	rr       map[string]int
-	store    *SessionStore
-	ctxSize  int
-	parallel int
+	workers       []*Worker
+	mu            sync.Mutex
+	policies      map[string]RoutingPolicy
+	defaultPolicy string
+	store         *SessionStore
+	ctxSize       int
+	parallel      int
 }
 
 func NewPool(specs []WorkerSpec) *Pool {
 	p := &Pool{
-		rr:       map[string]int{},
+		policies: map[string]RoutingPolicy{},
 		store:    NewSessionStore(),
 		ctxSize:  8192,
 		parallel: 2,
+	}
+	for _, policy := range newRoutingPolicies() {
+		p.policies[policy.Name()] = policy
+		if p.defaultPolicy == "" {
+			p.defaultPolicy = policy.Name()
+		}
 	}
 	for _, s := range specs {
 		u := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", s.Port)}
@@ -173,7 +181,22 @@ func (w *Worker) markExited() bool {
 
 func (p *Pool) Workers() []*Worker { return p.workers }
 
+// Pick uses the pool's default routing policy.
 func (p *Pool) Pick(model string) (*Worker, error) {
+	return p.PickWithPolicy(model, "")
+}
+
+// PickWithPolicy uses the named routing policy. An empty name means the
+// pool's default policy.
+func (p *Pool) PickWithPolicy(model, policyName string) (*Worker, error) {
+	policy, err := p.routingPolicy(policyName)
+	if err != nil {
+		return nil, err
+	}
+	return p.pickWith(policy, model)
+}
+
+func (p *Pool) pickWith(policy RoutingPolicy, model string) (*Worker, error) {
 	var known, healthy []*Worker
 	for _, w := range p.workers {
 		if w.Spec.Model == model {
@@ -189,11 +212,55 @@ func (p *Pool) Pick(model string) (*Worker, error) {
 	if len(healthy) == 0 {
 		return nil, ErrNoHealthyWorker
 	}
+	w := policy.Pick(model, healthy)
+	if w == nil {
+		return nil, ErrNoHealthyWorker
+	}
+	return w, nil
+}
+
+func (p *Pool) routingPolicy(name string) (RoutingPolicy, error) {
+	if name == "" {
+		p.mu.Lock()
+		name = p.defaultPolicy
+		p.mu.Unlock()
+	}
+	policy, ok := p.policies[name]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownRoutingPolicy, name)
+	}
+	return policy, nil
+}
+
+// RoutingPolicies lists the policies available to the server and TUI.
+func (p *Pool) RoutingPolicies() []api.RoutingPolicyInfo {
+	out := make([]api.RoutingPolicyInfo, 0, len(p.policies))
+	for _, policy := range p.policies {
+		out = append(out, api.RoutingPolicyInfo{
+			Name:        policy.Name(),
+			Description: policy.Description(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func (p *Pool) DefaultRoutingPolicy() string {
 	p.mu.Lock()
-	idx := p.rr[model] % len(healthy)
-	p.rr[model]++
+	defer p.mu.Unlock()
+	return p.defaultPolicy
+}
+
+// SetDefaultRoutingPolicy changes the policy used when a request does not
+// specify one. It is normally called once at startup.
+func (p *Pool) SetDefaultRoutingPolicy(name string) error {
+	if _, ok := p.policies[name]; !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownRoutingPolicy, name)
+	}
+	p.mu.Lock()
+	p.defaultPolicy = name
 	p.mu.Unlock()
-	return healthy[idx], nil
+	return nil
 }
 
 func (p *Pool) ModelStarting(model string) bool {
@@ -248,15 +315,26 @@ func (p *Pool) WorkerByID(id string) *Worker {
 	return nil
 }
 
+// PickForSession uses the pool's default routing policy.
 func (p *Pool) PickForSession(model, convID string) (*Worker, *Session, error) {
+	return p.PickForSessionWithPolicy(model, convID, "")
+}
+
+// PickForSessionWithPolicy is like PickForSession but uses the named routing
+// policy when a worker has to be chosen (new conversation or worker move).
+func (p *Pool) PickForSessionWithPolicy(model, convID, policyName string) (*Worker, *Session, error) {
+	policy, err := p.routingPolicy(policyName)
+	if err != nil {
+		return nil, nil, err
+	}
 	if convID == "" {
-		w, err := p.Pick(model)
+		w, err := p.pickWith(policy, model)
 		return w, nil, err
 	}
 
 	sess, ok := p.store.Get(convID)
 	if !ok {
-		w, err := p.Pick(model)
+		w, err := p.pickWith(policy, model)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -286,7 +364,7 @@ func (p *Pool) PickForSession(model, convID string) (*Worker, *Session, error) {
 	}
 
 	// Pinned worker is starting/unhealthy/exited -> move
-	w, err := p.Pick(model)
+	w, err = p.pickWith(policy, model)
 	if err != nil {
 		return nil, sess, err
 	}

@@ -19,18 +19,19 @@ import (
 )
 
 type Options struct {
-	Host       string
-	Port       int
-	ModelsDir  string
-	LlamaBin   string
-	Threads    int
-	Context    int
-	Parallel   int
-	Mock       bool
-	NGL        int    // layers offloaded per GPU worker; 0 = CPU only
-	GPUWorkers int    // first N workers get GPU offload
-	BackendLib string // e.g. /usr/local/lib/ollama/vulkan/libggml-vulkan.so
-	GPUDevice  string // e.g. Vulkan1; empty lets llama.cpp choose
+	Host          string
+	Port          int
+	ModelsDir     string
+	LlamaBin      string
+	Threads       int
+	Context       int
+	Parallel      int
+	Mock          bool
+	NGL           int    // layers offloaded per GPU worker; 0 = CPU only
+	GPUWorkers    int    // first N workers get GPU offload
+	BackendLib    string // e.g. /usr/local/lib/ollama/vulkan/libggml-vulkan.so
+	GPUDevice     string // e.g. Vulkan1; empty lets llama.cpp choose
+	RoutingPolicy string // default routing policy; empty keeps round-robin
 }
 
 func Run(o Options) error {
@@ -49,6 +50,11 @@ func Run(o Options) error {
 	defer stop()
 	pool := NewPool(DefaultWorkers())
 	pool.SetContextAndParallel(o.Context, o.Parallel)
+	if o.RoutingPolicy != "" {
+		if err := pool.SetDefaultRoutingPolicy(o.RoutingPolicy); err != nil {
+			return err
+		}
+	}
 	children := startChildren(ctx, pool, o)
 	pool.StartHealthChecks(ctx)
 	pool.StartSessionSweeper(ctx)

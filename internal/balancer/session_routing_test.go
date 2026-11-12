@@ -103,13 +103,8 @@ func newMockWorker(id, model string) (*Worker, *mockServer) {
 }
 
 func setupTestPool(workers []*Worker) (*Pool, http.Handler) {
-	pool := &Pool{
-		workers:  workers,
-		rr:       map[string]int{},
-		store:    NewSessionStore(),
-		ctxSize:  8192,
-		parallel: 2,
-	}
+	pool := NewPool(nil)
+	pool.workers = workers
 	handler := NewHandler(pool)
 	return pool, handler
 }

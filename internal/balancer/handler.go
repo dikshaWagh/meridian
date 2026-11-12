@@ -29,6 +29,7 @@ func NewHandler(pool *Pool) http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { handleChat(pool, w, r) })
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) { handleModels(pool, w) })
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) { handleStatus(pool, w) })
+	mux.HandleFunc("GET /policies", func(w http.ResponseWriter, r *http.Request) { handlePolicies(pool, w) })
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -61,6 +62,7 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	}
 	var req api.ChatRequest
 	convID := strings.TrimSpace(r.Header.Get("X-Conversation-ID"))
+	policyName := strings.TrimSpace(r.Header.Get("X-Meridian-Routing-Policy"))
 	workerID := ""
 	est := tokens.Estimate{}
 	usage := &requestUsage{}
@@ -98,7 +100,11 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	worker, sess, err := pool.PickForSession(req.Model, convID)
+	worker, sess, err := pool.PickForSessionWithPolicy(req.Model, convID, policyName)
+	if errors.Is(err, ErrUnknownRoutingPolicy) {
+		api.WriteError(w, 400, "unknown_routing_policy", err.Error())
+		return
+	}
 	if errors.Is(err, ErrModelNotFound) {
 		api.WriteError(w, 404, "model_not_found", "unknown model "+strconv.Quote(req.Model))
 		return
@@ -120,6 +126,11 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workerID = worker.Spec.ID
+
+	usedPolicy := policyName
+	if usedPolicy == "" {
+		usedPolicy = pool.DefaultRoutingPolicy()
+	}
 
 	upstreamReq := req
 	if convID != "" && sess != nil {
@@ -169,6 +180,7 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("X-Meridian-Worker", worker.Spec.ID)
 	w.Header().Set("X-Meridian-Model", req.Model)
+	w.Header().Set("X-Meridian-Routing-Policy", usedPolicy)
 	w.Header().Set("X-Meridian-Est-Input-Tokens", strconv.Itoa(est.Input))
 	w.Header().Set("X-Meridian-Est-Output-Tokens", strconv.Itoa(est.Output))
 	w.Header().Set("X-Meridian-Est-Total-Tokens", strconv.Itoa(est.Total))
@@ -236,5 +248,11 @@ func handleStatus(pool *Pool, w http.ResponseWriter) {
 	api.WriteJSON(w, 200, api.StatusResponse{
 		Workers:      pool.Snapshot(),
 		SessionCount: pool.SessionStore().TotalCount(),
+	})
+}
+func handlePolicies(pool *Pool, w http.ResponseWriter) {
+	api.WriteJSON(w, 200, api.RoutingPolicyList{
+		Default:  pool.DefaultRoutingPolicy(),
+		Policies: pool.RoutingPolicies(),
 	})
 }

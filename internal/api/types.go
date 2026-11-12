@@ -68,6 +68,16 @@ type StatusResponse struct {
 	SessionCount int            `json:"sessionCount"`
 }
 
+type RoutingPolicyInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type RoutingPolicyList struct {
+	Default  string              `json:"default"`
+	Policies []RoutingPolicyInfo `json:"policies"`
+}
+
 type ErrorBody struct {
 	Error struct {
 		Message string `json:"message"`
