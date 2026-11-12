@@ -261,6 +261,7 @@ func Start(parent context.Context, cfg *Config, opts Options) (*Service, error) 
 				Engine:         g.Engine,
 				Device:         g.Device,
 				ModelPath:      g.ModelPath,
+				ServerURL:      g.ServerURL,
 				Concurrency:    g.Concurrency,
 				MaxWidth:       g.MaxWidth,
 				MaxHeight:      g.MaxHeight,

@@ -298,6 +298,32 @@ type ImageGenerationBackend interface {
 validated, but this build reports a clear `worker_start_failed: … unavailable in
 this build` error and blocks only that worker. No Python runtime is introduced.
 
+For real image generation without cgo, use `engine: stable-diffusion-server`.
+Meridian proxies to a locally running
+[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
+`sd-server` over its Stable Diffusion WebUI API (`/sdapi/v1/txt2img`), while
+`sd-server` owns the model weights and native runtime. A ready-to-run sample is
+[`configs/ml-sd-server.yaml`](configs/ml-sd-server.yaml):
+
+```bash
+# terminal 1: native runtime
+sd-server -m ~/models/stable-diffusion/model.safetensors \
+  --listen-ip 127.0.0.1 --listen-port 1234
+
+# terminal 2: Meridian
+./bin/meridian-server serve --enable-llm=false --enable-ml=true \
+  --ml-config ./configs/ml-sd-server.yaml
+
+# terminal 3: real PNG
+curl -X POST http://127.0.0.1:8080/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"a quiet mountain lake","width":512,"height":512,"steps":20,"seed":42}'
+```
+
+CPU inference can take minutes per image; `timeout_seconds` defaults to 900 in
+that sample. `sd-server` must already be running when a request arrives, but
+Meridian does not need it at startup.
+
 Why the native engines are not wired in yet: the candidate Go bindings
 (`microsoft/onnxruntime-go`, `Allod-Solutions/go-ocr`,
 `Pendra-Cloud/stable-diffusion-go`, `ardanlabs/malina`) require

@@ -1,0 +1,54 @@
+# Meridian ML config for REAL Stable Diffusion image generation.
+#
+# Meridian stays a pure Go process: it proxies to a stable-diffusion.cpp
+# `sd-server` that owns the model weights and native inference runtime.
+#
+# 1. Start sd-server (CPU build works on a 2 GB GPU laptop):
+#      ./build/bin/sd-server -m ~/meridian/models/stable-diffusion/model.safetensors \
+#        --listen-ip 127.0.0.1 --listen-port 1234
+# 2. Start Meridian:
+#      ./bin/meridian-server serve --enable-llm=false --enable-ml=true \
+#        --ml-config ./configs/ml-sd-server.yaml
+# 3. Generate:
+#      curl -X POST http://127.0.0.1:8080/v1/images/generations \
+#        -H 'Content-Type: application/json' \
+#        -d '{"prompt":"a quiet mountain lake","width":512,"height":512,"steps":20,"seed":42}'
+
+listen_host: 127.0.0.1
+
+resource_policy: protect-llm
+
+resources:
+  ram_headroom_mb: 1024
+  vram_headroom_mb: 1024
+  protected_llm_vram_mb: 1024
+  gpu_probe: auto
+
+shutdown_grace_seconds: 10
+
+ocr:
+  enabled: false
+
+image_generation:
+  enabled: true
+  model_id: stable-diffusion-v1-5
+  engine: stable-diffusion-server
+  device: cpu
+  # Local sd-server instance. Never expose this port publicly.
+  server_url: http://127.0.0.1:1234
+  # sd-server loads the weights itself; this budget is still used for host
+  # admission control. SD 1.5 fp16 on CPU is roughly 4 GB peak.
+  expected_ram_mb: 4096
+  expected_vram_mb: 0
+  request_overhead_vram_mb: 0
+  concurrency: 1
+  port: 8092
+  output_dir: ./data/generated
+  max_width: 768
+  max_height: 768
+  max_steps: 40
+  default_steps: 20
+  max_prompt_chars: 2000
+  # CPU generation at 512x512/20 steps can take a few minutes.
+  timeout_seconds: 900
+  startup_timeout_seconds: 60

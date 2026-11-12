@@ -28,6 +28,7 @@ type WorkerConfig struct {
 	Device         string `json:"device"`
 	ModelPath      string `json:"model_path,omitempty"`
 	ModelDir       string `json:"model_dir,omitempty"`
+	ServerURL      string `json:"server_url,omitempty"`
 	Concurrency    int    `json:"concurrency"`
 	MaxUploadMB    int64  `json:"max_upload_mb,omitempty"`
 	MaxWidth       int    `json:"max_width,omitempty"`

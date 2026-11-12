@@ -42,6 +42,7 @@ compiled into this build**:
 |---|---|---|
 | OCR | `onnxruntime` | blocked: requires a validated Go binding + ONNX Runtime shared library |
 | Image | `stable-diffusion.cpp` | blocked: requires a validated Go binding + stable-diffusion.cpp shared library |
+| Image | `stable-diffusion-server` | **working**: HTTP proxy to a local `sd-server` (`/sdapi/v1/txt2img`), no cgo |
 | both | `fake` | fully implemented, deterministic, no native code |
 
 Candidate bindings were reviewed at implementation time:

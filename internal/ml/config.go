@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -16,6 +17,9 @@ const (
 	EngineFake               = "fake"
 	EngineONNXRuntime        = "onnxruntime"
 	EngineStableDiffusionCPP = "stable-diffusion.cpp"
+	// EngineStableDiffusionServer proxies to a running stable-diffusion.cpp
+	// sd-server over its Stable Diffusion WebUI API (/sdapi/v1/txt2img).
+	EngineStableDiffusionServer = "stable-diffusion-server"
 )
 
 // Config is the top-level ML serving configuration (configs/ml.yaml).
@@ -56,6 +60,7 @@ type ImageGenConfig struct {
 	Engine                string `yaml:"engine"`
 	Device                string `yaml:"device"`
 	ModelPath             string `yaml:"model_path"`
+	ServerURL             string `yaml:"server_url"`
 	ExpectedRAMMB         int64  `yaml:"expected_ram_mb"`
 	ExpectedVRAMMB        int64  `yaml:"expected_vram_mb"`
 	RequestOverheadVRAMMB int64  `yaml:"request_overhead_vram_mb"`
@@ -216,11 +221,21 @@ func (c *Config) validate() error {
 		if g.ModelID == "" {
 			return fmt.Errorf("image_generation.model_id is required")
 		}
-		if g.Engine != EngineFake && g.Engine != EngineStableDiffusionCPP {
-			return fmt.Errorf("image_generation.engine %q is not recognised (want %s or %s)", g.Engine, EngineFake, EngineStableDiffusionCPP)
-		}
-		if g.Engine != EngineFake && g.ModelPath == "" {
-			return fmt.Errorf("image_generation.model_path is required for engine %s", g.Engine)
+		switch g.Engine {
+		case EngineFake:
+		case EngineStableDiffusionCPP:
+			if g.ModelPath == "" {
+				return fmt.Errorf("image_generation.model_path is required for engine %s", g.Engine)
+			}
+		case EngineStableDiffusionServer:
+			if g.ServerURL == "" {
+				return fmt.Errorf("image_generation.server_url is required for engine %s", g.Engine)
+			}
+			if err := validServerURL(g.ServerURL); err != nil {
+				return fmt.Errorf("image_generation.server_url: %w", err)
+			}
+		default:
+			return fmt.Errorf("image_generation.engine %q is not recognised (want %s, %s or %s)", g.Engine, EngineFake, EngineStableDiffusionCPP, EngineStableDiffusionServer)
 		}
 		if g.Concurrency < 1 {
 			return fmt.Errorf("image_generation.concurrency must be at least 1")
@@ -268,6 +283,20 @@ func isLoopbackHost(host string) bool {
 func validPort(port int) error {
 	if port < 1 || port > 65535 {
 		return fmt.Errorf("port %d is out of range", port)
+	}
+	return nil
+}
+
+func validServerURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("must be an http or https URL")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("must include a host")
 	}
 	return nil
 }

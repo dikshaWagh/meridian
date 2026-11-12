@@ -29,6 +29,19 @@ func TestLoadSampleConfig(t *testing.T) {
 	}
 }
 
+func TestLoadSDServerSampleConfig(t *testing.T) {
+	cfg, err := LoadConfig("../../configs/ml-sd-server.yaml")
+	if err != nil {
+		t.Fatalf("sd-server sample config must be valid: %v", err)
+	}
+	if cfg.ImageGeneration == nil || cfg.ImageGeneration.Engine != EngineStableDiffusionServer {
+		t.Fatalf("unexpected image config: %+v", cfg.ImageGeneration)
+	}
+	if cfg.OCR != nil && cfg.OCR.Enabled {
+		t.Fatal("sd-server sample should not enable the fake OCR worker")
+	}
+}
+
 func TestConfigDefaultsAndValidation(t *testing.T) {
 	path := writeTempConfig(t, `
 listen_host: 127.0.0.1
@@ -116,6 +129,25 @@ image_generation:
   engine: fake
   output_dir: ./out
   max_width: 100
+`,
+		"server engine without url": `
+ocr:
+  enabled: false
+image_generation:
+  enabled: true
+  model_id: img-1
+  engine: stable-diffusion-server
+  output_dir: ./out
+`,
+		"server engine bad url": `
+ocr:
+  enabled: false
+image_generation:
+  enabled: true
+  model_id: img-1
+  engine: stable-diffusion-server
+  server_url: 127.0.0.1:1234
+  output_dir: ./out
 `,
 		"unknown resource policy": `
 resource_policy: kill-llm

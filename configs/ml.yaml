@@ -10,6 +10,8 @@
 # `stable-diffusion.cpp` (image generation), supply the local model path and
 # install a validated Go binding plus the native shared library. See README.md;
 # this build reports those engines as unavailable and blocks only that worker.
+# For real image generation today use configs/ml-sd-server.yaml, which proxies
+# to a local stable-diffusion.cpp `sd-server` with engine: stable-diffusion-server.
 
 listen_host: 127.0.0.1
 
