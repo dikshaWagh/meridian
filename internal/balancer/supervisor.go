@@ -16,6 +16,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/dikshaWagh/meridian/internal/api"
+	"github.com/dikshaWagh/meridian/internal/ml"
 )
 
 type Options struct {
@@ -32,6 +35,10 @@ type Options struct {
 	BackendLib    string // e.g. /usr/local/lib/ollama/vulkan/libggml-vulkan.so
 	GPUDevice     string // e.g. Vulkan1; empty lets llama.cpp choose
 	RoutingPolicy string // default routing policy; empty keeps round-robin
+
+	EnableLLM bool   // start the existing LLM subsystem
+	EnableML  bool   // start the opt-in ML (OCR/image) subsystem
+	MLConfig  string // path to ML YAML configuration
 }
 
 func Run(o Options) error {
@@ -41,34 +48,99 @@ func Run(o Options) error {
 	if o.Context <= 0 {
 		o.Context = 8192
 	}
-	if o.ModelsDir, _ = expandHome(o.ModelsDir); !o.Mock {
-		if err := preflight(o); err != nil {
-			return err
+	if !o.EnableLLM && !o.EnableML {
+		return errors.New("at least one of --enable-llm or --enable-ml must be enabled")
+	}
+	if o.EnableML && o.MLConfig == "" {
+		o.MLConfig = "configs/ml.yaml"
+	}
+	mlGrace := 10 * time.Second
+	if o.EnableLLM {
+		if o.ModelsDir, _ = expandHome(o.ModelsDir); !o.Mock {
+			if err := preflight(o); err != nil {
+				return err
+			}
 		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	pool := NewPool(DefaultWorkers())
-	pool.SetContextAndParallel(o.Context, o.Parallel)
-	if o.RoutingPolicy != "" {
-		if err := pool.SetDefaultRoutingPolicy(o.RoutingPolicy); err != nil {
+
+	var pool *Pool
+	var children *sync.WaitGroup
+	if o.EnableLLM {
+		pool = NewPool(DefaultWorkers())
+		pool.SetContextAndParallel(o.Context, o.Parallel)
+		if o.RoutingPolicy != "" {
+			if err := pool.SetDefaultRoutingPolicy(o.RoutingPolicy); err != nil {
+				return err
+			}
+		}
+		children = startChildren(ctx, pool, o)
+		pool.StartHealthChecks(ctx)
+		pool.StartSessionSweeper(ctx)
+	}
+
+	var mlSvc *ml.Service
+	if o.EnableML {
+		cfg, err := ml.LoadConfig(o.MLConfig)
+		if err != nil {
+			if children != nil {
+				stop()
+				children.Wait()
+			}
 			return err
 		}
+		// The ML service has its own lifecycle so graceful shutdown can drain
+		// ML requests before children are signalled.
+		mlSvc, err = ml.Start(context.Background(), cfg, ml.Options{})
+		if err != nil {
+			if children != nil {
+				stop()
+				children.Wait()
+			}
+			return err
+		}
+		mlGrace = time.Duration(cfg.ShutdownGraceSeconds) * time.Second
 	}
-	children := startChildren(ctx, pool, o)
-	pool.StartHealthChecks(ctx)
-	pool.StartSessionSweeper(ctx)
-	srv := &http.Server{Addr: fmt.Sprintf("%s:%d", o.Host, o.Port), Handler: NewHandler(pool), ReadHeaderTimeout: 5 * time.Second}
+
+	root := http.NewServeMux()
+	if pool != nil {
+		root.Handle("/", NewHandler(pool))
+	} else {
+		root.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+			api.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		})
+	}
+	// ML endpoints are always registered: in LLM-only deployments they return
+	// a stable service_disabled error instead of a bare 404.
+	ml.Register(root, mlSvc)
+
+	srv := &http.Server{Addr: fmt.Sprintf("%s:%d", o.Host, o.Port), Handler: root, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
-	log.Printf("meridian listening on %s:%d (LAN: %s)", o.Host, o.Port, lanURL(o.Port))
+	llmState := "disabled"
+	if pool != nil {
+		llmState = fmt.Sprintf("%d workers", len(pool.Workers()))
+	}
+	mlState := "disabled"
+	if mlSvc != nil {
+		mlState = fmt.Sprintf("%d workers", len(mlSvc.Models()))
+	}
+	log.Printf("meridian listening on %s:%d (LAN: %s) llm=%s ml=%s", o.Host, o.Port, lanURL(o.Port), llmState, mlState)
 	err := srv.ListenAndServe()
 	stop()
-	children.Wait()
+	if mlSvc != nil {
+		mctx, cancel := context.WithTimeout(context.Background(), mlGrace)
+		_ = mlSvc.Shutdown(mctx)
+		cancel()
+	}
+	if children != nil {
+		children.Wait()
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
