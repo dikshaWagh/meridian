@@ -97,7 +97,7 @@ interface StreamChatOptions {
 }
 
 // streamChat speaks the OpenAI-compatible SSE dialect. llama-server streams
-// natively; the mock worker emulates it, so the UI has one code path.
+// natively, so the UI has one code path for both JSON and SSE replies.
 export async function streamChat(options: StreamChatOptions): Promise<string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (options.policy) headers['X-Meridian-Routing-Policy'] = options.policy

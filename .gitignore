@@ -5,3 +5,7 @@ data/
 web/node_modules/
 web/dist/
 .DS_Store
+
+# built binaries and runtime logs are machine-specific
+bin/
+internal/balancer/logs/

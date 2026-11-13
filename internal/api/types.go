@@ -1,4 +1,4 @@
-// Package api holds the JSON shapes shared by the balancer, mock worker and CLI.
+// Package api holds the JSON shapes shared by the balancer, llama workers and CLI.
 package api
 
 import (

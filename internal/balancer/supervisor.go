@@ -32,7 +32,6 @@ type Options struct {
 	Threads       int
 	Context       int
 	Parallel      int
-	Mock          bool
 	NGL           int    // layers offloaded per GPU worker; 0 = CPU only
 	GPUWorkers    int    // first N workers get GPU offload
 	BackendLib    string // e.g. /usr/local/lib/ollama/vulkan/libggml-vulkan.so
@@ -77,10 +76,9 @@ func Run(o Options) error {
 	}
 	mlGrace := 10 * time.Second
 	if o.EnableLLM {
-		if o.ModelsDir, _ = expandHome(o.ModelsDir); !o.Mock {
-			if err := preflight(o); err != nil {
-				return err
-			}
+		o.ModelsDir, _ = expandHome(o.ModelsDir)
+		if err := preflight(o); err != nil {
+			return err
 		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -333,22 +331,16 @@ func preflight(o Options) error {
 
 func startChildren(ctx context.Context, pool *Pool, o Options) *sync.WaitGroup {
 	var wg sync.WaitGroup
-	exe, _ := os.Executable()
 	for i, w := range pool.Workers() {
 		s := w.Spec
-		var cmd *exec.Cmd
-		if o.Mock {
-			cmd = exec.CommandContext(ctx, exe, "mock-worker", "--id", s.ID, "--model", s.Model, "--port", strconv.Itoa(s.Port), "--prefill-ms", strconv.Itoa(s.PrefillMS), "--decode-ms", strconv.Itoa(s.DecodeMS))
-		} else {
-			args := []string{"-m", filepath.Join(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", strconv.Itoa(o.Parallel)}
-			if o.NGL > 0 && i < o.GPUWorkers {
-				args = append(args, "-ngl", strconv.Itoa(o.NGL))
-				if o.GPUDevice != "" {
-					args = append(args, "--device", o.GPUDevice)
-				}
+		args := []string{"-m", filepath.Join(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", strconv.Itoa(o.Parallel)}
+		if o.NGL > 0 && i < o.GPUWorkers {
+			args = append(args, "-ngl", strconv.Itoa(o.NGL))
+			if o.GPUDevice != "" {
+				args = append(args, "--device", o.GPUDevice)
 			}
-			cmd = exec.CommandContext(ctx, o.LlamaBin, args...)
 		}
+		cmd := exec.CommandContext(ctx, o.LlamaBin, args...)
 		cmd.Env = workerEnv(o)
 		cmd.Cancel = func() error {
 			if cmd.Process == nil {

@@ -46,7 +46,6 @@ internal/
   balancer/           LLM handler, pool, routing, sessions, supervisor, workers
   ml/                 independent ML config, registry, router, supervisor,
                       resource admission, OCR/image backends and public API
-  mockworker/         fake LLM worker used by --mock
   metrics/            JSONL request metrics (LLM and ML)
   tokens/             rough token estimator
   tui/                terminal chat UI
@@ -79,7 +78,8 @@ configuration. The web app uses Node 18+.
 
 ```bash
 # terminal 1
-./bin/meridian-server serve --mock --enable-ml=true --ml-config ./configs/ml.yaml
+./bin/meridian-server serve --enable-ml=true --ml-config ./configs/ml.yaml \
+  --models-dir ~/models --llama-bin llama-server
 
 # terminal 2: Vite dev server on :5173, proxying /v1 and /ml to :8080
 npm --prefix web run dev
@@ -152,18 +152,17 @@ not enabled, and `409 switch_in_progress` if another switch is running.
 Switching is manual: Meridian never swaps modes behind the client's back. The
 React UI surfaces the switch as an explicit Chat / ML Studio choice.
 
-### Try it without models (mock LLM + fake ML)
+### Run against real LLM workers
+
+Meridian has no simulated LLM worker. Point it at a `llama-server` binary and a
+directory of GGUF files (the six files named in `internal/balancer/workers.go`):
 
 ```bash
-./bin/meridian-server serve --mock --enable-ml=true --ml-config ./configs/ml.yaml
+./bin/meridian-server serve --enable-llm=true --enable-ml=false \
+  --models-dir ~/models --llama-bin llama-server
 
 # in another shell
 ./bin/meridian-tui --addr http://localhost:8080
-
-curl -F file=@photo.png http://localhost:8080/v1/ocr
-curl -X POST http://localhost:8080/v1/images/generations \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"a quiet mountain lake at sunrise","width":512,"height":512,"steps":25,"seed":42}'
 ```
 
 Open <http://localhost:8080> for the web UI.
@@ -209,7 +208,8 @@ SSE deltas.
 
 See the existing flags (`--models-dir`, `--llama-bin`, `--threads`, `--ctx`,
 `--parallel`, `--ngl`, `--gpu-workers`, `--backend-lib`, `--gpu-device`,
-`--routing-policy`, `--mock`); their meaning is unchanged.
+`--routing-policy`); their meaning is unchanged. Every LLM worker is a real
+`llama-server` process; there is no simulated worker.
 
 ## ML subsystem
 
@@ -340,7 +340,7 @@ OCR text is written to metrics.
 ### Worker lifecycle and supervision
 
 `meridian-server ml-worker --kind ocr|image-generation --config <json>` runs as a
-child process of the server (the same self re-exec pattern as `--mock`). Each
+child process of the server (a self re-exec pattern; the same binary in worker mode). Each
 worker:
 
 - loads exactly one model/backend before reporting ready;

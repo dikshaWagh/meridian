@@ -30,10 +30,12 @@ vet:
 race:
 	$(GO) test -race ./internal/arbiter ./internal/balancer ./internal/ml
 
-# Mock LLM + fake ML: chat, OCR and image generation work without a GPU.
+# Serve real llama-server workers. Set MODELS_DIR and LLAMA_BIN for your host.
+MODELS_DIR ?= ~/models
+LLAMA_BIN  ?= llama-server
 run: build
-	./$(BIN)/meridian-server serve --mock --enable-ml=true \
-		--ml-config ./configs/ml.yaml
+	./$(BIN)/meridian-server serve --enable-llm=true \
+		--models-dir $(MODELS_DIR) --llama-bin $(LLAMA_BIN)
 
 # Vite dev server on :5173, proxying /v1 and /ml to :8080.
 dev-web:
