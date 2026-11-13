@@ -15,6 +15,7 @@ import (
 // with a clear error until a validated Go binding is wired in.
 const (
 	EngineFake               = "fake"
+	EngineTesseract          = "tesseract"
 	EngineONNXRuntime        = "onnxruntime"
 	EngineStableDiffusionCPP = "stable-diffusion.cpp"
 	// EngineStableDiffusionServer proxies to a running stable-diffusion.cpp
@@ -46,6 +47,7 @@ type OCRConfig struct {
 	Engine                string `yaml:"engine"`
 	Device                string `yaml:"device"`
 	ModelDir              string `yaml:"model_dir"`
+	Language              string `yaml:"language"`
 	ExpectedRAMMB         int64  `yaml:"expected_ram_mb"`
 	ExpectedVRAMMB        int64  `yaml:"expected_vram_mb"`
 	Concurrency           int    `yaml:"concurrency"`
@@ -55,25 +57,28 @@ type OCRConfig struct {
 }
 
 type ImageGenConfig struct {
-	Enabled               bool   `yaml:"enabled"`
-	ModelID               string `yaml:"model_id"`
-	Engine                string `yaml:"engine"`
-	Device                string `yaml:"device"`
-	ModelPath             string `yaml:"model_path"`
-	ServerURL             string `yaml:"server_url"`
-	ExpectedRAMMB         int64  `yaml:"expected_ram_mb"`
-	ExpectedVRAMMB        int64  `yaml:"expected_vram_mb"`
-	RequestOverheadVRAMMB int64  `yaml:"request_overhead_vram_mb"`
-	Concurrency           int    `yaml:"concurrency"`
-	Port                  int    `yaml:"port"`
-	OutputDir             string `yaml:"output_dir"`
-	MaxWidth              int    `yaml:"max_width"`
-	MaxHeight             int    `yaml:"max_height"`
-	MaxSteps              int    `yaml:"max_steps"`
-	DefaultSteps          int    `yaml:"default_steps"`
-	MaxPromptChars        int    `yaml:"max_prompt_chars"`
-	TimeoutSeconds        int    `yaml:"timeout_seconds"`
-	StartupTimeoutSeconds int    `yaml:"startup_timeout_seconds"`
+	Enabled               bool     `yaml:"enabled"`
+	ModelID               string   `yaml:"model_id"`
+	Engine                string   `yaml:"engine"`
+	Device                string   `yaml:"device"`
+	ModelPath             string   `yaml:"model_path"`
+	ServerURL             string   `yaml:"server_url"`
+	ServerCommand         string   `yaml:"server_command"`
+	ServerArgs            []string `yaml:"server_args"`
+	CFGScale              float64  `yaml:"cfg_scale"`
+	ExpectedRAMMB         int64    `yaml:"expected_ram_mb"`
+	ExpectedVRAMMB        int64    `yaml:"expected_vram_mb"`
+	RequestOverheadVRAMMB int64    `yaml:"request_overhead_vram_mb"`
+	Concurrency           int      `yaml:"concurrency"`
+	Port                  int      `yaml:"port"`
+	OutputDir             string   `yaml:"output_dir"`
+	MaxWidth              int      `yaml:"max_width"`
+	MaxHeight             int      `yaml:"max_height"`
+	MaxSteps              int      `yaml:"max_steps"`
+	DefaultSteps          int      `yaml:"default_steps"`
+	MaxPromptChars        int      `yaml:"max_prompt_chars"`
+	TimeoutSeconds        int      `yaml:"timeout_seconds"`
+	StartupTimeoutSeconds int      `yaml:"startup_timeout_seconds"`
 }
 
 // LoadConfig reads, normalises and validates an ML YAML configuration.
@@ -124,6 +129,9 @@ func (c *Config) normalize() {
 		}
 		if o.MaxUploadMB <= 0 {
 			o.MaxUploadMB = 10
+		}
+		if o.Language == "" {
+			o.Language = "eng"
 		}
 		if o.StartupTimeoutSeconds <= 0 {
 			o.StartupTimeoutSeconds = 60
@@ -196,10 +204,10 @@ func (c *Config) validate() error {
 		if o.ModelID == "" {
 			return fmt.Errorf("ocr.model_id is required")
 		}
-		if o.Engine != EngineFake && o.Engine != EngineONNXRuntime {
-			return fmt.Errorf("ocr.engine %q is not recognised (want %s or %s)", o.Engine, EngineFake, EngineONNXRuntime)
+		if o.Engine != EngineFake && o.Engine != EngineTesseract && o.Engine != EngineONNXRuntime {
+			return fmt.Errorf("ocr.engine %q is not recognised (want %s, %s or %s)", o.Engine, EngineFake, EngineTesseract, EngineONNXRuntime)
 		}
-		if o.Engine != EngineFake && o.ModelDir == "" {
+		if o.Engine == EngineONNXRuntime && o.ModelDir == "" {
 			return fmt.Errorf("ocr.model_dir is required for engine %s", o.Engine)
 		}
 		if o.Concurrency < 1 {
@@ -236,6 +244,12 @@ func (c *Config) validate() error {
 			}
 		default:
 			return fmt.Errorf("image_generation.engine %q is not recognised (want %s, %s or %s)", g.Engine, EngineFake, EngineStableDiffusionCPP, EngineStableDiffusionServer)
+		}
+		if g.CFGScale < 0 {
+			return fmt.Errorf("image_generation.cfg_scale must not be negative")
+		}
+		if g.ServerCommand != "" && g.Engine != EngineStableDiffusionServer {
+			return fmt.Errorf("image_generation.server_command is only supported for engine %s", EngineStableDiffusionServer)
 		}
 		if g.Concurrency < 1 {
 			return fmt.Errorf("image_generation.concurrency must be at least 1")

@@ -38,6 +38,12 @@ type Options struct {
 	GPUDevice     string // e.g. Vulkan1; empty lets llama.cpp choose
 	RoutingPolicy string // default routing policy; empty keeps round-robin
 
+	// LLMModel serves one GGUF file instead of the built-in worker set.
+	// Relative paths are resolved under ModelsDir.
+	LLMModel     string
+	LLMModelName string
+	LLMWorkers   int
+
 	EnableLLM bool   // start the existing LLM subsystem
 	EnableML  bool   // start the opt-in ML (OCR/image) subsystem
 	MLConfig  string // path to ML YAML configuration
@@ -87,7 +93,7 @@ func Run(o Options) error {
 	var pool *Pool
 	var llmRT *llmRuntime
 	if o.EnableLLM {
-		pool = NewPool(DefaultWorkers())
+		pool = NewPool(workerSpecs(o))
 		pool.SetContextAndParallel(o.Context, o.Parallel)
 		if o.RoutingPolicy != "" {
 			if err := pool.SetDefaultRoutingPolicy(o.RoutingPolicy); err != nil {
@@ -305,6 +311,29 @@ func expandHome(path string) (string, error) {
 	return path, nil
 }
 
+// workerSpecs returns the single-model set when --llm-model is given, or the
+// built-in worker set otherwise.
+func workerSpecs(o Options) []WorkerSpec {
+	file := strings.TrimSpace(o.LLMModel)
+	if file == "" {
+		return DefaultWorkers()
+	}
+	name := strings.TrimSpace(o.LLMModelName)
+	if name == "" {
+		base := filepath.Base(file)
+		name = strings.TrimSuffix(base, filepath.Ext(base))
+	}
+	return SingleModelWorkers(file, name, o.LLMWorkers)
+}
+
+// modelPath joins relative model files onto dir and leaves absolute paths alone.
+func modelPath(dir, file string) string {
+	if filepath.IsAbs(file) {
+		return file
+	}
+	return filepath.Join(dir, file)
+}
+
 func preflight(o Options) error {
 	var missing []string
 	seen := map[string]bool{}
@@ -316,8 +345,8 @@ func preflight(o Options) error {
 			missing = append(missing, o.BackendLib)
 		}
 	}
-	for _, w := range DefaultWorkers() {
-		file := filepath.Join(o.ModelsDir, w.File)
+	for _, w := range workerSpecs(o) {
+		file := modelPath(o.ModelsDir, w.File)
 		if _, err := os.Stat(file); err != nil && !seen[file] {
 			missing = append(missing, file)
 			seen[file] = true
@@ -333,7 +362,7 @@ func startChildren(ctx context.Context, pool *Pool, o Options) *sync.WaitGroup {
 	var wg sync.WaitGroup
 	for i, w := range pool.Workers() {
 		s := w.Spec
-		args := []string{"-m", filepath.Join(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", strconv.Itoa(o.Parallel)}
+		args := []string{"-m", modelPath(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", strconv.Itoa(o.Parallel)}
 		if o.NGL > 0 && i < o.GPUWorkers {
 			args = append(args, "-ngl", strconv.Itoa(o.NGL))
 			if o.GPUDevice != "" {

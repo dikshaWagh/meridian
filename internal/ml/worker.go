@@ -22,20 +22,24 @@ import (
 // WorkerConfig is the per-worker configuration written by the parent and
 // loaded by the `meridian-server ml-worker` child process.
 type WorkerConfig struct {
-	Kind           Kind   `json:"kind"`
-	ModelID        string `json:"model_id"`
-	Engine         string `json:"engine"`
-	Device         string `json:"device"`
-	ModelPath      string `json:"model_path,omitempty"`
-	ModelDir       string `json:"model_dir,omitempty"`
-	ServerURL      string `json:"server_url,omitempty"`
-	Concurrency    int    `json:"concurrency"`
-	MaxUploadMB    int64  `json:"max_upload_mb,omitempty"`
-	MaxWidth       int    `json:"max_width,omitempty"`
-	MaxHeight      int    `json:"max_height,omitempty"`
-	MaxSteps       int    `json:"max_steps,omitempty"`
-	DefaultSteps   int    `json:"default_steps,omitempty"`
-	MaxPromptChars int    `json:"max_prompt_chars,omitempty"`
+	Kind           Kind     `json:"kind"`
+	ModelID        string   `json:"model_id"`
+	Engine         string   `json:"engine"`
+	Device         string   `json:"device"`
+	ModelPath      string   `json:"model_path,omitempty"`
+	ModelDir       string   `json:"model_dir,omitempty"`
+	ServerURL      string   `json:"server_url,omitempty"`
+	ServerCommand  string   `json:"server_command,omitempty"`
+	ServerArgs     []string `json:"server_args,omitempty"`
+	CFGScale       float64  `json:"cfg_scale,omitempty"`
+	Language       string   `json:"language,omitempty"`
+	Concurrency    int      `json:"concurrency"`
+	MaxUploadMB    int64    `json:"max_upload_mb,omitempty"`
+	MaxWidth       int      `json:"max_width,omitempty"`
+	MaxHeight      int      `json:"max_height,omitempty"`
+	MaxSteps       int      `json:"max_steps,omitempty"`
+	DefaultSteps   int      `json:"default_steps,omitempty"`
+	MaxPromptChars int      `json:"max_prompt_chars,omitempty"`
 	// StartupDelayMS simulates model load time (used by tests).
 	StartupDelayMS int `json:"startup_delay_ms,omitempty"`
 }

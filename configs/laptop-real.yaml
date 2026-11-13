@@ -1,0 +1,58 @@
+listen_host: 127.0.0.1
+resource_policy: protect-llm
+
+# 16 GB laptop: keep ~2 GB for the desktop and the rest of the OS.
+resources:
+  ram_headroom_mb: 2048
+  vram_headroom_mb: 0
+  protected_llm_vram_mb: 0
+  gpu_probe: off
+
+shutdown_grace_seconds: 10
+
+ocr:
+  enabled: true
+  model_id: tesseract-eng
+  engine: tesseract
+  device: cpu
+  language: eng
+  expected_ram_mb: 300
+  expected_vram_mb: 0
+  concurrency: 1
+  port: 8091
+  max_upload_mb: 10
+  startup_timeout_seconds: 30
+
+image_generation:
+  enabled: true
+  model_id: sd-turbo
+  engine: stable-diffusion-server
+  device: cpu
+  # Meridian owns this process: it starts sd-server on ML start and stops it on ML stop.
+  server_url: http://127.0.0.1:1234
+  server_command: /home/rudra/src/stable-diffusion.cpp/build/bin/sd-server
+  server_args:
+    - "-m"
+    - "/home/rudra/models/sd_turbo.safetensors"
+    - "--type"
+    - "f16"
+    - "--listen-ip"
+    - "127.0.0.1"
+    - "--listen-port"
+    - "1234"
+    - "-t"
+    - "8"
+  cfg_scale: 1.0
+  expected_ram_mb: 5000
+  expected_vram_mb: 0
+  request_overhead_vram_mb: 0
+  concurrency: 1
+  port: 8092
+  output_dir: ./data/generated
+  max_width: 768
+  max_height: 768
+  max_steps: 40
+  default_steps: 4
+  max_prompt_chars: 2000
+  timeout_seconds: 900
+  startup_timeout_seconds: 180
