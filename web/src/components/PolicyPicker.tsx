@@ -16,7 +16,9 @@ export function PolicyPicker({ policies, selected, onSelect }: PolicyPickerProps
         <button className="picker-trigger" onClick={toggle} aria-expanded={open} aria-label="Choose routing policy">
           <Sliders size={16} />
           <span className="picker-value">{selected || 'Routing policy'}</span>
-          <ChevronDown size={14} className={open ? 'rotated' : ''} />
+          <span className="picker-chevron">
+            <ChevronDown size={12} className={open ? 'rotated' : ''} />
+          </span>
         </button>
       )}
     >

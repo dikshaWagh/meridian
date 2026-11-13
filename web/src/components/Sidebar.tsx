@@ -1,6 +1,7 @@
 import type { Conversation, Mode } from '../types'
 import type { Theme } from '../hooks/useTheme'
-import { ChevronDown, Moon, Plus, Sparkle, Sun, Trash, X } from './Icons'
+import { ChevronDown, Moon, Plus, Sun, Trash, X } from './Icons'
+import { CompassMark } from './CompassMark'
 
 interface SidebarProps {
   conversations: Conversation[]
@@ -40,8 +41,8 @@ export function Sidebar({
       {open && <button className="sidebar-scrim" aria-label="Close sidebar" onClick={onClose} />}
       <aside className={`sidebar ${open ? 'open' : ''}`}>
         <div className="brand">
-          <div className="brand-orb">
-            <Sparkle size={18} />
+          <div className="brand-mark">
+            <CompassMark width={34} height={34} />
           </div>
           <div className="brand-text">
             <div className="brand-name">Meridian</div>

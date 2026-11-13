@@ -25,7 +25,9 @@ export function ModelPicker({ models, selected, onSelect }: ModelPickerProps) {
           <Cpu size={16} />
           <span className="picker-value">{selected || 'Choose a model'}</span>
           {current?.context_window ? <span className="picker-meta">{current.context_window} ctx</span> : null}
-          <ChevronDown size={14} className={open ? 'rotated' : ''} />
+          <span className="picker-chevron">
+            <ChevronDown size={12} className={open ? 'rotated' : ''} />
+          </span>
         </button>
       )}
     >
