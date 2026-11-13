@@ -23,7 +23,14 @@ func validArtifactID(id string) bool { return artifactIDPattern.MatchString(id) 
 // the endpoints registered but returns service_disabled, which gives clients a
 // stable contract in LLM-only deployments.
 func Register(mux *http.ServeMux, svc *Service) {
-	h := &Handler{svc: svc}
+	RegisterFunc(mux, func() *Service { return svc })
+}
+
+// RegisterFunc mounts the ML API with a service provider. The provider is
+// consulted per request so the exclusive-mode arbiter can stop and start the
+// ML subsystem without re-registering routes.
+func RegisterFunc(mux *http.ServeMux, get func() *Service) {
+	h := &Handler{get: get}
 	mux.HandleFunc("POST /v1/ocr", h.handleOCR)
 	mux.HandleFunc("POST /v1/images/generations", h.handleImageGeneration)
 	mux.HandleFunc("GET /v1/ml/models", h.handleModels)
@@ -33,7 +40,14 @@ func Register(mux *http.ServeMux, svc *Service) {
 
 // Handler serves Meridian's ML endpoints.
 type Handler struct {
-	svc *Service
+	get func() *Service
+}
+
+func (h *Handler) service() *Service {
+	if h == nil || h.get == nil {
+		return nil
+	}
+	return h.get()
 }
 
 func NewHandler(svc *Service) http.Handler {
@@ -85,12 +99,13 @@ func (h *Handler) handleOCR(w http.ResponseWriter, r *http.Request) {
 		})
 	}()
 
-	if h.svc == nil || h.svc.cfg == nil || h.svc.cfg.OCR == nil || !h.svc.cfg.OCR.Enabled {
+	svc := h.service()
+	if svc == nil || svc.cfg == nil || svc.cfg.OCR == nil || !svc.cfg.OCR.Enabled {
 		errType = "service_disabled"
 		api.WriteError(w, http.StatusServiceUnavailable, errType, "ML serving is disabled (start with --enable-llm/--enable-ml and an ml config)")
 		return
 	}
-	cfg := h.svc.cfg.OCR
+	cfg := svc.cfg.OCR
 	maxUpload := cfg.MaxUploadMB << 20
 	if maxUpload <= 0 {
 		maxUpload = 10 << 20
@@ -135,7 +150,7 @@ func (h *Handler) handleOCR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.svc.Recognize(r.Context(), modelID, raw, contentType, requestID)
+	resp, err := svc.Recognize(r.Context(), modelID, raw, contentType, requestID)
 	if err != nil {
 		errType = h.writeServiceError(w, KindOCR, modelID, err)
 		return
@@ -165,7 +180,8 @@ func (h *Handler) handleImageGeneration(w http.ResponseWriter, r *http.Request) 
 		})
 	}()
 
-	if h.svc == nil || h.svc.cfg == nil || h.svc.cfg.ImageGeneration == nil || !h.svc.cfg.ImageGeneration.Enabled {
+	svc := h.service()
+	if svc == nil || svc.cfg == nil || svc.cfg.ImageGeneration == nil || !svc.cfg.ImageGeneration.Enabled {
 		errType = "service_disabled"
 		api.WriteError(w, http.StatusServiceUnavailable, errType, "ML serving is disabled (start with --enable-ml=true and an ml config)")
 		return
@@ -180,10 +196,10 @@ func (h *Handler) handleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	}
 	modelID = req.Model
 	if modelID == "" {
-		modelID = h.svc.cfg.ImageGeneration.ModelID
+		modelID = svc.cfg.ImageGeneration.ModelID
 	}
 
-	resp, err := h.svc.GenerateImage(r.Context(), req)
+	resp, err := svc.GenerateImage(r.Context(), req)
 	if err != nil {
 		errType = h.writeServiceError(w, KindImageGeneration, modelID, err)
 		return
@@ -192,12 +208,13 @@ func (h *Handler) handleImageGeneration(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request) {
-	if h.svc == nil {
+	svc := h.service()
+	if svc == nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "service_disabled", "ML serving is disabled")
 		return
 	}
 	id := r.PathValue("id")
-	path, err := h.svc.ArtifactPath(id)
+	path, err := svc.ArtifactPath(id)
 	if err != nil {
 		api.WriteError(w, http.StatusNotFound, "model_not_found", "artifact not found")
 		return
@@ -220,14 +237,15 @@ func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	list := ModelList{Object: "list", Data: []ModelStatus{}}
-	if h.svc != nil {
-		list.Data = h.svc.Models()
+	if svc := h.service(); svc != nil {
+		list.Data = svc.Models()
 	}
 	api.WriteJSON(w, http.StatusOK, list)
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if h.svc == nil {
+	svc := h.service()
+	if svc == nil {
 		api.WriteJSON(w, http.StatusOK, StatusResponse{
 			Enabled:   false,
 			Models:    []ModelStatus{},
@@ -236,7 +254,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, h.svc.Snapshot())
+	api.WriteJSON(w, http.StatusOK, svc.Snapshot())
 }
 
 // writeServiceError maps stable ML errors to the API error contract and
@@ -259,8 +277,8 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, kind Kind, modelID st
 		api.WriteError(w, http.StatusServiceUnavailable, "no_healthy_worker", "all ML workers for this model are busy")
 		return "no_healthy_worker"
 	case errors.Is(err, ErrNoHealthyWorker):
-		if h.svc != nil {
-			if status, errType, msg, ok := h.svc.blockedReason(kind, modelID); ok {
+		if svc := h.service(); svc != nil {
+			if status, errType, msg, ok := svc.blockedReason(kind, modelID); ok {
 				api.WriteError(w, status, errType, msg)
 				return errType
 			}

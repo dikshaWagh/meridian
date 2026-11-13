@@ -30,6 +30,9 @@ func NewHandler(pool *Pool) http.Handler {
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) { handleModels(pool, w) })
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) { handleStatus(pool, w) })
 	mux.HandleFunc("GET /policies", func(w http.ResponseWriter, r *http.Request) { handlePolicies(pool, w) })
+	mux.HandleFunc("PUT /v1/policies/default", func(w http.ResponseWriter, r *http.Request) {
+		handleSetDefaultPolicy(pool, w, r)
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})

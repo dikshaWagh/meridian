@@ -9,6 +9,12 @@ server exposes two independent serving subsystems:
   own registry, router, process supervisor, concurrency limits and resource
   admission control.
 
+When both subsystems are enabled, the default **exclusive serving mode** keeps
+exactly one of them resident: switching from chat to OCR/image generation drains
+in-flight requests, stops the LLM workers, waits for their memory to be released,
+then starts the ML workers (and vice versa). A bundled React UI exposes mode
+switching, routing-policy selection, model choice, chat and the ML tools.
+
 Clients (React, TUI, `curl`, the stress tool) only ever talk to Meridian. Worker
 listeners are loopback-only.
 
@@ -35,6 +41,8 @@ cmd/
   meridian-stress/    LLM load generator
 internal/
   api/                shared request/response JSON types
+  arbiter/            exclusive-mode lease, drain/stop/start state machine,
+                      guard middleware and /v1/system control plane
   balancer/           LLM handler, pool, routing, sessions, supervisor, workers
   ml/                 independent ML config, registry, router, supervisor,
                       resource admission, OCR/image backends and public API
@@ -42,20 +50,44 @@ internal/
   metrics/            JSONL request metrics (LLM and ML)
   tokens/             rough token estimator
   tui/                terminal chat UI
+  webui/              embedded production build of the React app
+web/                  React 19 + TypeScript + Vite source for the web UI
 configs/ml.yaml       sample ML configuration (fake engines, runnable anywhere)
 ```
 
 ## Build
 
 ```bash
+# production web assets (embedded into the server binary)
+npm --prefix web install
+npm --prefix web run build
+
 go build ./...
 go build -o bin/meridian-server ./cmd/meridian-server
 go build -o bin/meridian-tui    ./cmd/meridian-tui
 go build -o bin/meridian-stress ./cmd/meridian-stress
 ```
 
-Go 1.22+ is required. The only added module is `gopkg.in/yaml.v3` for the ML
-configuration.
+Or `make build`, which builds the web app first. The committed
+`internal/webui/dist` lets `go build ./...` work without Node; rebuild it after
+changing anything under `web/src`.
+
+Go 1.22+ is required. The only added Go module is `gopkg.in/yaml.v3` for the ML
+configuration. The web app uses Node 18+.
+
+### Web UI development
+
+```bash
+# terminal 1
+./bin/meridian-server serve --mock --enable-ml=true --ml-config ./configs/ml.yaml
+
+# terminal 2: Vite dev server on :5173, proxying /v1 and /ml to :8080
+npm --prefix web run dev
+```
+
+`npm --prefix web run typecheck` runs `tsc --noEmit`. Production builds are
+written directly to `internal/webui/dist` and served from `/` by the Go server;
+`/v1/*` and `/ml/*` are never shadowed by the SPA fallback.
 
 ## Deployment modes
 
@@ -69,14 +101,56 @@ The existing LLM-first behavior is the default; ML serving is opt-in.
 ./bin/meridian-server serve --enable-llm=false --enable-ml=true \
   --ml-config ./configs/ml.yaml
 
-# Both behind one listener
+# Both behind one listener, exclusive by default
 ./bin/meridian-server serve --enable-llm=true --enable-ml=true \
   --ml-config ./configs/ml.yaml
+
+# Both resident at once (legacy behavior)
+./bin/meridian-server serve --enable-llm=true --enable-ml=true \
+  --serving-mode concurrent --ml-config ./configs/ml.yaml
 ```
 
 Disabling both fails startup with a configuration error. `--enable-llm=false`
 does not run preflight checks or spawn LLM workers; `--enable-ml=false` does not
 load ML configuration or spawn ML workers.
+
+### Exclusive serving mode
+
+`--serving-mode exclusive` (the default) applies only when **both** LLM and ML
+are enabled. It guarantees the two subsystems never hold memory at the same
+time:
+
+```text
+llm active --switch--> draining -> stopping LLM -> starting ML -> warming -> ml active
+```
+
+- `--initial-mode llm|ml` chooses the subsystem started at boot (default `llm`).
+  The HTTP listener comes up immediately; the UI shows warm-up progress.
+- A switch drains in-flight work (30s), stops the current subsystem and waits
+  for child processes to exit (60s), pauses briefly for memory reclaim, starts
+  the target (60s) and waits for readiness (5m).
+- Requests for the inactive subsystem are rejected with `409 mode_conflict`;
+  requests that arrive mid-switch receive `503 switching` and `Retry-After: 2`.
+- Status, model catalog, artifacts and the control plane stay available in
+  either mode so the UI can render and drive the switch.
+- Single-subsystem deployments and `--serving-mode concurrent` keep the previous
+  behavior; no arbiter is installed.
+
+Control plane:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v1/system/state` | current mode, phase, progress, in-flight counts |
+| `POST` | `/v1/system/mode` | switch modes: `{"mode":"llm"}` or `{"mode":"ml"}` |
+| `GET` | `/v1/system/events` | SSE stream of state changes |
+| `GET` | `/v1/catalog` | LLM + ML models, health and active mode |
+
+`POST /v1/system/mode` returns `202 Accepted` when a switch starts, `200 OK`
+when the target is already active, `409 mode_unavailable` if that subsystem is
+not enabled, and `409 switch_in_progress` if another switch is running.
+
+Switching is manual: Meridian never swaps modes behind the client's back. The
+React UI surfaces the switch as an explicit Chat / ML Studio choice.
 
 ### Try it without models (mock LLM + fake ML)
 
@@ -92,7 +166,28 @@ curl -X POST http://localhost:8080/v1/images/generations \
   -d '{"prompt":"a quiet mountain lake at sunrise","width":512,"height":512,"steps":25,"seed":42}'
 ```
 
-## LLM subsystem (unchanged contract)
+Open <http://localhost:8080> for the web UI.
+
+## Web UI
+
+The bundled React app is a single-page client for the whole server:
+
+- **Chat** — streamed OpenAI-style chat with a model picker, routing-policy
+  picker, per-conversation history and Markdown rendering. History is sent with
+  every request (stateless client); the server-side session store is left to the
+  TUI.
+- **ML Studio** — OCR drop zone and text-to-image generation with recent
+  renders served from `/v1/artifacts/{id}`.
+- **Mode switch** — Chat and ML Studio are the two sides of the exclusive
+  lease. The switch is explicit and shows drain/stop/start/warm-up progress
+  from `/v1/system/events`.
+- Light/dark appearance, glassy panels and an Apple-style blue accent, with no
+  UI framework beyond React.
+
+The app is built into `internal/webui/dist` and embedded with
+`//go:embed all:dist`, so a single binary serves both the API and the UI.
+
+## LLM subsystem
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -100,14 +195,20 @@ curl -X POST http://localhost:8080/v1/images/generations \
 | `GET` | `/v1/models` | LLM models with at least one healthy worker |
 | `GET` | `/status` | Per-worker LLM status |
 | `GET` | `/policies` | Routing policies |
+| `PUT` | `/v1/policies/default` | Change the default policy at runtime |
 | `GET` | `/healthz` | Liveness |
 
 Routing policies are `round-robin` (default), `random` and `least-connections`.
 Sessions are sticky: the policy runs only when a worker is chosen (new
 conversation or failover). `X-Conversation-ID` provides per-conversation
 affinity and `409 conversation_busy` enforces one in-flight request per
-conversation. See the existing flags (`--models-dir`, `--llama-bin`, `--threads`,
-`--ctx`, `--parallel`, `--ngl`, `--gpu-workers`, `--backend-lib`, `--gpu-device`,
+conversation. `X-Meridian-Routing-Policy` pins a single request to a policy, and
+`PUT /v1/policies/default` with `{"name":"least-connections"}` changes the
+server default. Set `"stream": true` on `/v1/chat/completions` for OpenAI-style
+SSE deltas.
+
+See the existing flags (`--models-dir`, `--llama-bin`, `--threads`, `--ctx`,
+`--parallel`, `--ngl`, `--gpu-workers`, `--backend-lib`, `--gpu-device`,
 `--routing-policy`, `--mock`); their meaning is unchanged.
 
 ## ML subsystem
@@ -346,21 +447,26 @@ dependency. The adapters are ready for a validated binding; see
 go build ./...
 go test ./...
 go vet ./...
-go test -race ./internal/balancer ./internal/ml
+go test -race ./internal/arbiter ./internal/balancer ./internal/ml
+npm --prefix web run typecheck
 ```
 
-The ML suite covers configuration validation, OCR/image APIs, invalid MIME,
-malformed and oversized uploads, artifact retrieval and path-traversal
-rejection, disabled-service behavior, worker readiness/health, initialisation
-failure without restart loops, port conflicts, concurrency limits, resource
-admission (including "unknown VRAM is not unlimited"), and the protect-llm
-invariant. No test needs model weights or a GPU.
+The arbiter suite covers activation, drain-before-stop, start/ready failures,
+mode-conflict and switching responses, SSE events and concurrent switch
+rejection. The ML suite covers configuration validation, OCR/image APIs,
+invalid MIME, malformed and oversized uploads, artifact retrieval and
+path-traversal rejection, disabled-service behavior, worker readiness/health,
+initialisation failure without restart loops, port conflicts, concurrency
+limits, resource admission (including "unknown VRAM is not unlimited"), and the
+protect-llm invariant. No test needs model weights or a GPU.
 
 ## Current limitations
 
 - Static LLM worker list; one ML worker per configured model.
-- No streaming/SSE for LLM; no streaming image previews.
+- No streaming image previews (generation returns a complete PNG).
 - No authentication or TLS.
+- Exclusive mode is manual-only: there is no automatic mode inference or
+  request queuing across a switch.
 - In-memory LLM sessions (lost on restart); OCR/image requests are stateless.
 - Approximate LLM token counting.
 - Metrics are file-based only.

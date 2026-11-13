@@ -2,6 +2,7 @@ package balancer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -18,7 +19,9 @@ import (
 	"time"
 
 	"github.com/dikshaWagh/meridian/internal/api"
+	"github.com/dikshaWagh/meridian/internal/arbiter"
 	"github.com/dikshaWagh/meridian/internal/ml"
+	"github.com/dikshaWagh/meridian/internal/webui"
 )
 
 type Options struct {
@@ -39,7 +42,19 @@ type Options struct {
 	EnableLLM bool   // start the existing LLM subsystem
 	EnableML  bool   // start the opt-in ML (OCR/image) subsystem
 	MLConfig  string // path to ML YAML configuration
+
+	// ServingMode is "exclusive" (LLM and ML never resident together) or
+	// "concurrent" (legacy behavior: both start at boot).
+	ServingMode string
+	// InitialMode is the mode activated at boot in exclusive serving:
+	// "llm" (default) or "ml".
+	InitialMode string
 }
+
+const (
+	ServingExclusive  = "exclusive"
+	ServingConcurrent = "concurrent"
+)
 
 func Run(o Options) error {
 	if o.Parallel <= 0 {
@@ -50,6 +65,12 @@ func Run(o Options) error {
 	}
 	if !o.EnableLLM && !o.EnableML {
 		return errors.New("at least one of --enable-llm or --enable-ml must be enabled")
+	}
+	if o.ServingMode == "" {
+		o.ServingMode = ServingExclusive
+	}
+	if o.ServingMode != ServingExclusive && o.ServingMode != ServingConcurrent {
+		return fmt.Errorf("invalid --serving-mode %q (want %q or %q)", o.ServingMode, ServingExclusive, ServingConcurrent)
 	}
 	if o.EnableML && o.MLConfig == "" {
 		o.MLConfig = "configs/ml.yaml"
@@ -66,7 +87,7 @@ func Run(o Options) error {
 	defer stop()
 
 	var pool *Pool
-	var children *sync.WaitGroup
+	var llmRT *llmRuntime
 	if o.EnableLLM {
 		pool = NewPool(DefaultWorkers())
 		pool.SetContextAndParallel(o.Context, o.Parallel)
@@ -75,32 +96,64 @@ func Run(o Options) error {
 				return err
 			}
 		}
-		children = startChildren(ctx, pool, o)
-		pool.StartHealthChecks(ctx)
-		pool.StartSessionSweeper(ctx)
+		llmRT = newLLMRuntime(o, pool)
 	}
 
-	var mlSvc *ml.Service
+	var mlCfg *ml.Config
+	var mlRT *mlRuntime
 	if o.EnableML {
-		cfg, err := ml.LoadConfig(o.MLConfig)
+		var err error
+		mlCfg, err = ml.LoadConfig(o.MLConfig)
 		if err != nil {
-			if children != nil {
-				stop()
-				children.Wait()
-			}
 			return err
 		}
-		// The ML service has its own lifecycle so graceful shutdown can drain
-		// ML requests before children are signalled.
-		mlSvc, err = ml.Start(context.Background(), cfg, ml.Options{})
-		if err != nil {
-			if children != nil {
-				stop()
-				children.Wait()
-			}
+		mlRT = newMLRuntime(mlCfg, ml.Options{})
+		mlGrace = time.Duration(mlCfg.ShutdownGraceSeconds) * time.Second
+	}
+
+	// Exclusive serving requires both subsystems: one lease, one resident
+	// subsystem. With a single subsystem there is nothing to arbitrate.
+	exclusive := o.EnableLLM && o.EnableML && o.ServingMode != ServingConcurrent
+
+	var arb *arbiter.Arbiter
+	if exclusive {
+		initial := o.InitialMode
+		if initial == "" {
+			initial = string(arbiter.ModeLLM)
+		}
+		switch arbiter.Mode(initial) {
+		case arbiter.ModeLLM, arbiter.ModeML:
+		default:
+			return fmt.Errorf("invalid --initial-mode %q (want llm or ml)", o.InitialMode)
+		}
+		arb = arbiter.New(arbiter.Options{
+			Subsystems: map[arbiter.Mode]arbiter.Subsystem{
+				arbiter.ModeLLM: llmRT,
+				arbiter.ModeML:  mlRT,
+			},
+			Initial: arbiter.Mode(initial),
+		})
+		if err := arb.Start(); err != nil {
 			return err
 		}
-		mlGrace = time.Duration(cfg.ShutdownGraceSeconds) * time.Second
+	} else {
+		if llmRT != nil {
+			if err := llmRT.Start(context.Background()); err != nil {
+				return err
+			}
+		}
+		if mlRT != nil {
+			if err := mlRT.Start(context.Background()); err != nil {
+				if llmRT != nil {
+					_ = llmRT.Stop(context.Background())
+				}
+				return err
+			}
+		}
+	}
+	if pool != nil {
+		pool.StartHealthChecks(ctx)
+		pool.StartSessionSweeper(ctx)
 	}
 
 	root := http.NewServeMux()
@@ -113,9 +166,24 @@ func Run(o Options) error {
 	}
 	// ML endpoints are always registered: in LLM-only deployments they return
 	// a stable service_disabled error instead of a bare 404.
-	ml.Register(root, mlSvc)
+	ml.RegisterFunc(root, func() *ml.Service {
+		if mlRT == nil {
+			return nil
+		}
+		return mlRT.Current()
+	})
+	root.Handle("GET /v1/catalog", handleCatalog(pool, mlRT, arb, o.ServingMode))
+	if arb != nil {
+		arb.Register(root)
+	}
 
-	srv := &http.Server{Addr: fmt.Sprintf("%s:%d", o.Host, o.Port), Handler: root, ReadHeaderTimeout: 5 * time.Second}
+	var handler http.Handler = withCORS(root)
+	handler = webui.Handler(handler)
+	if arb != nil {
+		handler = arb.Middleware(handler)
+	}
+
+	srv := &http.Server{Addr: fmt.Sprintf("%s:%d", o.Host, o.Port), Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -123,28 +191,105 @@ func Run(o Options) error {
 		_ = srv.Shutdown(sctx)
 	}()
 	llmState := "disabled"
-	if pool != nil {
+	if llmRT != nil {
 		llmState = fmt.Sprintf("%d workers", len(pool.Workers()))
 	}
 	mlState := "disabled"
-	if mlSvc != nil {
-		mlState = fmt.Sprintf("%d workers", len(mlSvc.Models()))
+	if mlCfg != nil {
+		mlState = "configured"
 	}
-	log.Printf("meridian listening on %s:%d (LAN: %s) llm=%s ml=%s", o.Host, o.Port, lanURL(o.Port), llmState, mlState)
+	serving := o.ServingMode
+	if !exclusive {
+		serving = "single/concurrent"
+	}
+	log.Printf("meridian listening on %s:%d (LAN: %s) llm=%s ml=%s serving=%s", o.Host, o.Port, lanURL(o.Port), llmState, mlState, serving)
 	err := srv.ListenAndServe()
 	stop()
-	if mlSvc != nil {
-		mctx, cancel := context.WithTimeout(context.Background(), mlGrace)
-		_ = mlSvc.Shutdown(mctx)
-		cancel()
-	}
-	if children != nil {
-		children.Wait()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), maxDuration(mlGrace, 60*time.Second))
+	defer cancel()
+	if arb != nil {
+		if err := arb.Close(shutdownCtx); err != nil {
+			log.Printf("arbiter shutdown: %v", err)
+		}
+	} else {
+		if llmRT != nil {
+			if err := llmRT.Stop(shutdownCtx); err != nil {
+				log.Printf("llm shutdown: %v", err)
+			}
+		}
+		if mlRT != nil {
+			if err := mlRT.Stop(shutdownCtx); err != nil {
+				log.Printf("ml shutdown: %v", err)
+			}
+		}
 	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// withCORS keeps the Vite dev server usable without configuring a proxy. The
+// server has no authentication, so this does not widen an existing boundary.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Conversation-ID, X-Meridian-Routing-Policy, X-Request-ID")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Meridian-Worker, X-Meridian-Model, X-Meridian-Routing-Policy, X-Meridian-Mode, X-Meridian-Phase")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func handleSetDefaultPolicy(pool *Pool, w http.ResponseWriter, r *http.Request) {
+	var req api.PolicyUpdateRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	if err := dec.Decode(&req); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "invalid_request", "body must be {\"name\":\"<policy>\"}")
+		return
+	}
+	if err := pool.SetDefaultRoutingPolicy(strings.TrimSpace(req.Name)); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "unknown_routing_policy", err.Error())
+		return
+	}
+	handlePolicies(pool, w)
+}
+
+func handleCatalog(pool *Pool, mlRT *mlRuntime, arb *arbiter.Arbiter, servingMode string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		out := api.CatalogResponse{
+			LLM:                  []api.CatalogModel{},
+			ML:                   []api.CatalogModel{},
+			RoutingPolicies:      []api.RoutingPolicyInfo{},
+			DefaultRoutingPolicy: "",
+			ServingMode:          servingMode,
+		}
+		if pool != nil {
+			out.LLM = pool.ModelCatalog()
+			out.RoutingPolicies = pool.RoutingPolicies()
+			out.DefaultRoutingPolicy = pool.DefaultRoutingPolicy()
+		}
+		if mlRT != nil {
+			out.ML = mlRT.Catalog()
+		}
+		if arb == nil {
+			out.ServingMode = "single"
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, http.StatusOK, out)
+	}
 }
 
 func expandHome(path string) (string, error) {

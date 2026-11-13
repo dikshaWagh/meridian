@@ -15,6 +15,7 @@ type ChatRequest struct {
 	Model     string    `json:"model"`
 	Messages  []Message `json:"messages"`
 	MaxTokens int       `json:"max_tokens,omitempty"`
+	Stream    bool      `json:"stream,omitempty"`
 }
 
 type Choice struct {
@@ -76,6 +77,36 @@ type RoutingPolicyInfo struct {
 type RoutingPolicyList struct {
 	Default  string              `json:"default"`
 	Policies []RoutingPolicyInfo `json:"policies"`
+}
+
+// CatalogModel is one selectable model in GET /v1/catalog. LLM entries stay
+// listed while the LLM subsystem is stopped so a client can choose one before
+// switching modes.
+type CatalogModel struct {
+	ID             string `json:"id"`
+	Object         string `json:"object"`
+	Kind           string `json:"kind"` // llm | ocr | image-generation
+	State          string `json:"state"`
+	Healthy        bool   `json:"healthy"`
+	Workers        int    `json:"workers,omitempty"`
+	HealthyWorkers int    `json:"healthy_workers,omitempty"`
+	ContextWindow  int    `json:"context_window,omitempty"`
+	Description    string `json:"description,omitempty"`
+}
+
+// CatalogResponse is the single payload the React UI uses to render model and
+// policy pickers, regardless of the active serving mode.
+type CatalogResponse struct {
+	LLM                  []CatalogModel      `json:"llm"`
+	ML                   []CatalogModel      `json:"ml"`
+	RoutingPolicies      []RoutingPolicyInfo `json:"routing_policies"`
+	DefaultRoutingPolicy string              `json:"default_routing_policy"`
+	ServingMode          string              `json:"serving_mode"` // exclusive | concurrent
+}
+
+// PolicyUpdateRequest is the body of PUT /v1/policies/default.
+type PolicyUpdateRequest struct {
+	Name string `json:"name"`
 }
 
 type ErrorBody struct {

@@ -2,3 +2,6 @@ meridian
 /model
 logs/
 data/
+web/node_modules/
+web/dist/
+.DS_Store

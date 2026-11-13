@@ -218,6 +218,20 @@ func (w *Worker) markExited() bool {
 	return was != StateUnhealthy
 }
 
+// markStarting resets a worker for a fresh process generation. It clears the
+// exited flag and renews the readiness grace window so a restart is not
+// immediately judged against its previous lifetime.
+func (w *Worker) markStarting() {
+	w.exited.Store(false)
+	w.consecutiveFailures.Store(0)
+	w.mu.Lock()
+	w.startedAt = time.Now()
+	w.lastError = ""
+	w.lastCheck = time.Time{}
+	w.mu.Unlock()
+	w.state.Store(StateStarting)
+}
+
 func (p *Pool) Workers() []*Worker { return p.workers }
 
 // Pick uses the pool's default routing policy.
@@ -322,6 +336,7 @@ func (p *Pool) ModelStarting(model string) bool {
 	}
 	return false
 }
+// Models returns model ids with at least one healthy worker.
 func (p *Pool) Models() []string {
 	seen := map[string]bool{}
 	out := []string{}
@@ -332,6 +347,59 @@ func (p *Pool) Models() []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// ModelCatalog lists every configured LLM model, healthy or not. The React UI
+// needs the full list while the LLM subsystem is stopped so the user can pick
+// a model before switching back.
+func (p *Pool) ModelCatalog() []api.CatalogModel {
+	if p == nil {
+		return []api.CatalogModel{}
+	}
+	type agg struct {
+		model           string
+		workers, healthy, starting int
+	}
+	order := []string{}
+	byModel := map[string]*agg{}
+	for _, w := range p.workers {
+		e, ok := byModel[w.Spec.Model]
+		if !ok {
+			e = &agg{model: w.Spec.Model}
+			byModel[w.Spec.Model] = e
+			order = append(order, w.Spec.Model)
+		}
+		e.workers++
+		switch w.State() {
+		case "healthy":
+			e.healthy++
+		case "starting":
+			e.starting++
+		}
+	}
+	sort.Strings(order)
+	out := make([]api.CatalogModel, 0, len(order))
+	for _, model := range order {
+		e := byModel[model]
+		state := "unhealthy"
+		switch {
+		case e.starting > 0:
+			state = "starting"
+		case e.healthy > 0:
+			state = "ready"
+		}
+		out = append(out, api.CatalogModel{
+			ID:             model,
+			Object:         "model",
+			Kind:           "llm",
+			State:          state,
+			Healthy:        e.healthy > 0,
+			Workers:        e.workers,
+			HealthyWorkers: e.healthy,
+			ContextWindow:  p.PerConvContext(),
+		})
+	}
 	return out
 }
 

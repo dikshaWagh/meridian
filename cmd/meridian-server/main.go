@@ -35,6 +35,8 @@ func main() {
 		fs.BoolVar(&o.EnableLLM, "enable-llm", true, "enable the LLM serving subsystem")
 		fs.BoolVar(&o.EnableML, "enable-ml", false, "enable the ML (OCR/image generation) serving subsystem")
 		fs.StringVar(&o.MLConfig, "ml-config", "configs/ml.yaml", "path to the ML YAML configuration")
+		fs.StringVar(&o.ServingMode, "serving-mode", "exclusive", "exclusive (LLM and ML never resident together) or concurrent")
+		fs.StringVar(&o.InitialMode, "initial-mode", "llm", "mode activated at boot in exclusive serving: llm or ml")
 		fs.Parse(os.Args[2:])
 		if err := balancer.Run(o); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
