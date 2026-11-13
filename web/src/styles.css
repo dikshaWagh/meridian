@@ -2230,3 +2230,98 @@ button {
     scroll-behavior: auto !important;
   }
 }
+
+/* ============================================================
+   macOS Sonoma skin
+   Solid, low-chroma surfaces with system-style hairlines and soft
+   shadows. Layered on top of the tokens above; no blur, no gradients.
+   ============================================================ */
+
+:root {
+  --bg: #e9e9eb;
+  --panel: #ffffff;
+  --bg-elevated: #ffffff;
+  --card: #ffffff;
+  --popover: #ffffff;
+  --input-bg: #f4f4f6;
+  --hover: rgba(0, 0, 0, 0.05);
+  --code-bg: #f2f2f4;
+  --bubble-assistant: #f2f2f4;
+
+  --text: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-tertiary: #98989d;
+
+  --border: rgba(0, 0, 0, 0.09);
+  --border-strong: rgba(0, 0, 0, 0.16);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.06);
+
+  --radius-xl: 20px;
+  --radius-lg: 14px;
+  --radius-md: 10px;
+  --radius-sm: 8px;
+}
+
+[data-theme="dark"] {
+  --bg: #161618;
+  --panel: #1f1f21;
+  --bg-elevated: #2a2a2d;
+  --card: #2a2a2d;
+  --popover: #2c2c2f;
+  --input-bg: #2a2a2d;
+  --hover: rgba(255, 255, 255, 0.07);
+  --code-bg: #2a2a2d;
+  --bubble-assistant: #2a2a2d;
+
+  --text: #f5f5f7;
+  --text-secondary: #a1a1a6;
+  --text-tertiary: #7c7c81;
+
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 34px rgba(0, 0, 0, 0.5);
+}
+
+*,
+*::before,
+*::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.app::before {
+  background: none;
+}
+
+[data-theme="dark"] .app::before {
+  background: none;
+}
+
+.app {
+  background: var(--bg);
+}
+
+.sidebar {
+  background: #e4e4e7;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.main-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+[data-theme="dark"] .sidebar {
+  background: #242427;
+}
