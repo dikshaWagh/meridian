@@ -78,6 +78,8 @@ func main() {
 		fs.IntVar(&o.LLMWorkers, "llm-workers", 1, "[DEPRECATED] number of workers for --llm-model (use --llm instead)")
 		fs.StringVar(&o.MLConfig, "ml-config", "configs/ml.yaml", "path to the ML YAML configuration")
 		fs.IntVar(&o.RAMHeadroomMB, "ram-headroom-mb", 1024, "RAM kept free after admitting all LLM instances")
+		fs.BoolVar(&o.RestartWorkers, "restart-workers", true, "restart a worker process automatically when it exits")
+		fs.IntVar(&o.MaxRestarts, "max-restarts", 5, "consecutive failed restarts before a worker is left down")
 
 		var llmFlags llmFlagSlice
 		fs.Var(&llmFlags, "llm", "model file with optional instance count, e.g. qwen.gguf:2 (repeat for each model; count defaults to 1)")

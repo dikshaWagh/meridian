@@ -45,6 +45,11 @@ type Options struct {
 	// RAMHeadroomMB is kept free after all LLM instances are admitted.
 	RAMHeadroomMB int
 
+	// RestartWorkers restarts a llama-server process after it exits.
+	// MaxRestarts is the number of consecutive failed restarts before giving up.
+	RestartWorkers bool
+	MaxRestarts    int
+
 	// LLMConfigs lists every model this node serves and its instance count.
 	LLMConfigs []LLMConfig
 
@@ -422,44 +427,91 @@ func memAvailableBytes() (int64, error) {
 func startChildren(ctx context.Context, pool *Pool, o Options) *sync.WaitGroup {
 	var wg sync.WaitGroup
 	for i, w := range pool.Workers() {
-		s := w.Spec
-		args := []string{"-m", modelPath(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", strconv.Itoa(o.Parallel)}
-		if o.NGL > 0 && i < o.GPUWorkers {
-			args = append(args, "-ngl", strconv.Itoa(o.NGL))
-			if o.GPUDevice != "" {
-				args = append(args, "--device", o.GPUDevice)
-			}
-		}
-		cmd := exec.CommandContext(ctx, o.LlamaBin, args...)
-		cmd.Env = workerEnv(o)
-		cmd.Cancel = func() error {
-			if cmd.Process == nil {
-				return nil
-			}
-			return cmd.Process.Signal(syscall.SIGTERM)
-		}
-		cmd.WaitDelay = 5 * time.Second
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		if err := cmd.Start(); err != nil {
-			log.Printf("failed to start worker %s: %v", s.ID, err)
-			if w.markExited() {
-				log.Printf("worker %s (%s) is now unhealthy", s.ID, s.Model)
-			}
-			continue
-		}
-		w.PID.Store(int64(cmd.Process.Pid))
 		wg.Add(1)
-		go func(w *Worker, cmd *exec.Cmd) {
+		go func(w *Worker, index int) {
 			defer wg.Done()
-			_ = cmd.Wait()
-			if w.markExited() {
-				log.Printf("worker %s (%s) is now unhealthy", w.Spec.ID, w.Spec.Model)
-			}
-			log.Printf("worker %s exited", w.Spec.ID)
-		}(w, cmd)
+			superviseWorker(ctx, w, index, o)
+		}(w, i)
 	}
 	return &wg
+}
+
+// superviseWorker runs one worker and, when its process exits, starts it
+// again with exponential backoff. It returns when ctx is cancelled (server
+// shutdown), when restarts are disabled, or after too many crashes in a row.
+func superviseWorker(ctx context.Context, w *Worker, index int, o Options) {
+	const (
+		minBackoff = time.Second
+		maxBackoff = 30 * time.Second
+		stableRun  = time.Minute
+	)
+	backoff := minBackoff
+	crashes := 0
+	for {
+		started := time.Now()
+		cmd, err := startWorkerProcess(ctx, w, index, o)
+		if err != nil {
+			log.Printf("failed to start worker %s: %v", w.Spec.ID, err)
+		} else {
+			w.PID.Store(int64(cmd.Process.Pid))
+			_ = cmd.Wait()
+			log.Printf("worker %s exited", w.Spec.ID)
+		}
+		if w.markExited() {
+			log.Printf("worker %s (%s) is now unhealthy", w.Spec.ID, w.Spec.Model)
+		}
+
+		if ctx.Err() != nil || !o.RestartWorkers {
+			return
+		}
+		if time.Since(started) >= stableRun {
+			crashes = 0
+			backoff = minBackoff
+		}
+		crashes++
+		if crashes > o.MaxRestarts {
+			log.Printf("worker %s (%s): giving up after %d failed restarts; restart the server to bring it back", w.Spec.ID, w.Spec.Model, o.MaxRestarts)
+			return
+		}
+		log.Printf("restarting worker %s in %s (attempt %d of %d)", w.Spec.ID, backoff, crashes, o.MaxRestarts)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+		w.markStarting()
+	}
+}
+
+// startWorkerProcess launches one llama-server process for w. The process is
+// tied to ctx, so cancelling ctx stops it.
+func startWorkerProcess(ctx context.Context, w *Worker, index int, o Options) (*exec.Cmd, error) {
+	s := w.Spec
+	args := []string{"-m", modelPath(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", strconv.Itoa(o.Parallel)}
+	if o.NGL > 0 && index < o.GPUWorkers {
+		args = append(args, "-ngl", strconv.Itoa(o.NGL))
+		if o.GPUDevice != "" {
+			args = append(args, "--device", o.GPUDevice)
+		}
+	}
+	cmd := exec.CommandContext(ctx, o.LlamaBin, args...)
+	cmd.Env = workerEnv(o)
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
 }
 
 // workerEnv points llama.cpp at a specific backend (for example Vulkan).
