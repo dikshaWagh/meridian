@@ -491,14 +491,22 @@ func superviseWorker(ctx context.Context, w *Worker, index int, o Options) {
 func startWorkerProcess(ctx context.Context, w *Worker, index int, o Options) (*exec.Cmd, error) {
 	s := w.Spec
 	args := []string{"-m", modelPath(o.ModelsDir, s.File), "--alias", s.Model, "--host", "127.0.0.1", "--port", strconv.Itoa(s.Port), "-t", strconv.Itoa(o.Threads), "-c", strconv.Itoa(o.Context), "-np", strconv.Itoa(o.Parallel)}
-	if o.NGL > 0 && index < o.GPUWorkers {
+	useGPU := o.NGL > 0 && index < o.GPUWorkers
+	if useGPU {
 		args = append(args, "-ngl", strconv.Itoa(o.NGL))
 		if o.GPUDevice != "" {
 			args = append(args, "--device", o.GPUDevice)
 		}
+	} else {
+		// llama-server offloads layers to a visible GPU by default, so CPU
+		// workers must opt out explicitly or they fill VRAM.
+		args = append(args, "-ngl", "0")
 	}
 	cmd := exec.CommandContext(ctx, o.LlamaBin, args...)
 	cmd.Env = workerEnv(o)
+	if !useGPU {
+		cmd.Env = hideGPU(cmd.Env)
+	}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -512,6 +520,15 @@ func startWorkerProcess(ctx context.Context, w *Worker, index int, o Options) (*
 		return nil, err
 	}
 	return cmd, nil
+}
+
+// hideGPU makes CUDA see no devices. Prompt processing otherwise still
+// reserves VRAM on CPU-only workers, which starves the GPU workers.
+func hideGPU(env []string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+	return append(env, "CUDA_VISIBLE_DEVICES=")
 }
 
 // workerEnv points llama.cpp at a specific backend (for example Vulkan).
