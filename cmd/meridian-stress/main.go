@@ -109,7 +109,7 @@ func main() {
 	// This creates a buffered channel named jobs that can hold total items of type
 	// ye sirf aek thread safe FIFO Data structure hai.
 	jobs := make(chan conversation, total)
-	
+
 	for _, c := range convs {
 		jobs <- c
 	}
@@ -187,8 +187,8 @@ func fetchModels(addr string) []string {
 // for a given model reuses scripts[i % len(scripts)].
 func buildConversations(models []string, perModel int) []conversation {
 	convs := make([]conversation, 0, len(models)*perModel)
-	for i := 0; i < perModel; i++ {        // outer loop: conversation index
-		for _, m := range models {          // inner loop: model
+	for i := 0; i < perModel; i++ { // outer loop: conversation index
+		for _, m := range models { // inner loop: model
 			convs = append(convs, conversation{
 				Model:  m,
 				ConvID: fmt.Sprintf("%s-c%d", m, i),

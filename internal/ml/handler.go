@@ -2,22 +2,15 @@ package ml
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"image"
 	"io"
 	"net/http"
-	"os"
-	"regexp"
 	"time"
 
 	"github.com/dikshaWagh/meridian/internal/api"
 	"github.com/dikshaWagh/meridian/internal/metrics"
 )
-
-var artifactIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
-
-func validArtifactID(id string) bool { return artifactIDPattern.MatchString(id) }
 
 // Register mounts the ML public API on an existing mux. A nil service keeps
 // the endpoints registered but returns service_disabled, which gives clients a
@@ -26,16 +19,12 @@ func Register(mux *http.ServeMux, svc *Service) {
 	RegisterFunc(mux, func() *Service { return svc })
 }
 
-// RegisterFunc mounts the ML API with a service provider. The provider is
-// consulted per request so the exclusive-mode arbiter can stop and start the
-// ML subsystem without re-registering routes.
+// RegisterFunc mounts the ML API with a service provider, consulted per request.
 func RegisterFunc(mux *http.ServeMux, get func() *Service) {
 	h := &Handler{get: get}
 	mux.HandleFunc("POST /v1/ocr", h.handleOCR)
-	mux.HandleFunc("POST /v1/images/generations", h.handleImageGeneration)
 	mux.HandleFunc("GET /v1/ml/models", h.handleModels)
 	mux.HandleFunc("GET /ml/status", h.handleStatus)
-	mux.HandleFunc("GET /v1/artifacts/{id}", h.handleArtifact)
 }
 
 // Handler serves Meridian's ML endpoints.
@@ -102,7 +91,7 @@ func (h *Handler) handleOCR(w http.ResponseWriter, r *http.Request) {
 	svc := h.service()
 	if svc == nil || svc.cfg == nil || svc.cfg.OCR == nil || !svc.cfg.OCR.Enabled {
 		errType = "service_disabled"
-		api.WriteError(w, http.StatusServiceUnavailable, errType, "ML serving is disabled (start with --enable-llm/--enable-ml and an ml config)")
+		api.WriteError(w, http.StatusServiceUnavailable, errType, "ML serving is disabled (start with --enable-ml and an ml config)")
 		return
 	}
 	cfg := svc.cfg.OCR
@@ -157,82 +146,6 @@ func (h *Handler) handleOCR(w http.ResponseWriter, r *http.Request) {
 	}
 	modelID = resp.Model
 	api.WriteJSON(w, http.StatusOK, resp)
-}
-
-func (h *Handler) handleImageGeneration(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	w = rec
-	requestID := metrics.NewRequestID()
-	w.Header().Set("X-Request-ID", requestID)
-	modelID := ""
-	errType := ""
-	defer func() {
-		metrics.AppendMLRequest(metrics.MLRequestLog{
-			Timestamp:  time.Now().UTC().Format(time.RFC3339),
-			RequestID:  requestID,
-			Service:    "meridian-ml",
-			Kind:       string(KindImageGeneration),
-			Model:      modelID,
-			StatusCode: rec.status,
-			LatencyMS:  time.Since(start).Milliseconds(),
-			ErrorType:  errType,
-		})
-	}()
-
-	svc := h.service()
-	if svc == nil || svc.cfg == nil || svc.cfg.ImageGeneration == nil || !svc.cfg.ImageGeneration.Enabled {
-		errType = "service_disabled"
-		api.WriteError(w, http.StatusServiceUnavailable, errType, "ML serving is disabled (start with --enable-ml=true and an ml config)")
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	var req ImageGenerationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errType = "invalid_request"
-		api.WriteError(w, http.StatusBadRequest, errType, "body is not valid JSON or exceeds 1 MiB")
-		return
-	}
-	modelID = req.Model
-	if modelID == "" {
-		modelID = svc.cfg.ImageGeneration.ModelID
-	}
-
-	resp, err := svc.GenerateImage(r.Context(), req)
-	if err != nil {
-		errType = h.writeServiceError(w, KindImageGeneration, modelID, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, resp)
-}
-
-func (h *Handler) handleArtifact(w http.ResponseWriter, r *http.Request) {
-	svc := h.service()
-	if svc == nil {
-		api.WriteError(w, http.StatusServiceUnavailable, "service_disabled", "ML serving is disabled")
-		return
-	}
-	id := r.PathValue("id")
-	path, err := svc.ArtifactPath(id)
-	if err != nil {
-		api.WriteError(w, http.StatusNotFound, "model_not_found", "artifact not found")
-		return
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		api.WriteError(w, http.StatusNotFound, "model_not_found", "artifact not found")
-		return
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		api.WriteError(w, http.StatusNotFound, "model_not_found", "artifact not found")
-		return
-	}
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "private, max-age=86400")
-	http.ServeContent(w, r, id+".png", info.ModTime(), f)
 }
 
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {

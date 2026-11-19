@@ -52,7 +52,7 @@ func TestSetDefaultRoutingPolicyEndpoint(t *testing.T) {
 
 func TestCatalogListsStoppedLLMModels(t *testing.T) {
 	pool := apiTestPool()
-	h := handleCatalog(pool, nil, nil, ServingExclusive)
+	h := handleCatalog(pool, nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/catalog", nil))
 	if rec.Code != http.StatusOK {

@@ -79,13 +79,11 @@ type RoutingPolicyList struct {
 	Policies []RoutingPolicyInfo `json:"policies"`
 }
 
-// CatalogModel is one selectable model in GET /v1/catalog. LLM entries stay
-// listed while the LLM subsystem is stopped so a client can choose one before
-// switching modes.
+// CatalogModel is one selectable model in GET /v1/catalog.
 type CatalogModel struct {
 	ID             string `json:"id"`
 	Object         string `json:"object"`
-	Kind           string `json:"kind"` // llm | ocr | image-generation
+	Kind           string `json:"kind"` // llm | ocr
 	State          string `json:"state"`
 	Healthy        bool   `json:"healthy"`
 	Workers        int    `json:"workers,omitempty"`
@@ -95,13 +93,12 @@ type CatalogModel struct {
 }
 
 // CatalogResponse is the single payload the React UI uses to render model and
-// policy pickers, regardless of the active serving mode.
+// policy pickers.
 type CatalogResponse struct {
 	LLM                  []CatalogModel      `json:"llm"`
 	ML                   []CatalogModel      `json:"ml"`
 	RoutingPolicies      []RoutingPolicyInfo `json:"routing_policies"`
 	DefaultRoutingPolicy string              `json:"default_routing_policy"`
-	ServingMode          string              `json:"serving_mode"` // exclusive | concurrent
 }
 
 // PolicyUpdateRequest is the body of PUT /v1/policies/default.

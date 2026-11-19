@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/dikshaWagh/meridian/internal/api"
-	"github.com/dikshaWagh/meridian/internal/arbiter"
 	"github.com/dikshaWagh/meridian/internal/ml"
 	"github.com/dikshaWagh/meridian/internal/webui"
 )
@@ -44,22 +43,10 @@ type Options struct {
 	LLMModelName string
 	LLMWorkers   int
 
-	EnableLLM bool   // start the existing LLM subsystem
-	EnableML  bool   // start the opt-in ML (OCR/image) subsystem
+	EnableLLM bool   // start the LLM subsystem
+	EnableML  bool   // start the OCR subsystem
 	MLConfig  string // path to ML YAML configuration
-
-	// ServingMode is "exclusive" (LLM and ML never resident together) or
-	// "concurrent" (legacy behavior: both start at boot).
-	ServingMode string
-	// InitialMode is the mode activated at boot in exclusive serving:
-	// "llm" (default) or "ml".
-	InitialMode string
 }
-
-const (
-	ServingExclusive  = "exclusive"
-	ServingConcurrent = "concurrent"
-)
 
 func Run(o Options) error {
 	if o.Parallel <= 0 {
@@ -70,12 +57,6 @@ func Run(o Options) error {
 	}
 	if !o.EnableLLM && !o.EnableML {
 		return errors.New("at least one of --enable-llm or --enable-ml must be enabled")
-	}
-	if o.ServingMode == "" {
-		o.ServingMode = ServingExclusive
-	}
-	if o.ServingMode != ServingExclusive && o.ServingMode != ServingConcurrent {
-		return fmt.Errorf("invalid --serving-mode %q (want %q or %q)", o.ServingMode, ServingExclusive, ServingConcurrent)
 	}
 	if o.EnableML && o.MLConfig == "" {
 		o.MLConfig = "configs/ml.yaml"
@@ -115,44 +96,19 @@ func Run(o Options) error {
 		mlGrace = time.Duration(mlCfg.ShutdownGraceSeconds) * time.Second
 	}
 
-	// Exclusive serving requires both subsystems: one lease, one resident
-	// subsystem. With a single subsystem there is nothing to arbitrate.
-	exclusive := o.EnableLLM && o.EnableML && o.ServingMode != ServingConcurrent
-
-	var arb *arbiter.Arbiter
-	if exclusive {
-		initial := o.InitialMode
-		if initial == "" {
-			initial = string(arbiter.ModeLLM)
-		}
-		switch arbiter.Mode(initial) {
-		case arbiter.ModeLLM, arbiter.ModeML:
-		default:
-			return fmt.Errorf("invalid --initial-mode %q (want llm or ml)", o.InitialMode)
-		}
-		arb = arbiter.New(arbiter.Options{
-			Subsystems: map[arbiter.Mode]arbiter.Subsystem{
-				arbiter.ModeLLM: llmRT,
-				arbiter.ModeML:  mlRT,
-			},
-			Initial: arbiter.Mode(initial),
-		})
-		if err := arb.Start(); err != nil {
+	// Start every enabled subsystem directly. There is no exclusive lease:
+	// the LLM pool and OCR workers share the binary and live side by side.
+	if llmRT != nil {
+		if err := llmRT.Start(context.Background()); err != nil {
 			return err
 		}
-	} else {
-		if llmRT != nil {
-			if err := llmRT.Start(context.Background()); err != nil {
-				return err
+	}
+	if mlRT != nil {
+		if err := mlRT.Start(context.Background()); err != nil {
+			if llmRT != nil {
+				_ = llmRT.Stop(context.Background())
 			}
-		}
-		if mlRT != nil {
-			if err := mlRT.Start(context.Background()); err != nil {
-				if llmRT != nil {
-					_ = llmRT.Stop(context.Background())
-				}
-				return err
-			}
+			return err
 		}
 	}
 	if pool != nil {
@@ -176,16 +132,10 @@ func Run(o Options) error {
 		}
 		return mlRT.Current()
 	})
-	root.Handle("GET /v1/catalog", handleCatalog(pool, mlRT, arb, o.ServingMode))
-	if arb != nil {
-		arb.Register(root)
-	}
+	root.Handle("GET /v1/catalog", handleCatalog(pool, mlRT))
 
 	var handler http.Handler = withCORS(root)
 	handler = webui.Handler(handler)
-	if arb != nil {
-		handler = arb.Middleware(handler)
-	}
 
 	srv := &http.Server{Addr: fmt.Sprintf("%s:%d", o.Host, o.Port), Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -202,30 +152,20 @@ func Run(o Options) error {
 	if mlCfg != nil {
 		mlState = "configured"
 	}
-	serving := o.ServingMode
-	if !exclusive {
-		serving = "single/concurrent"
-	}
-	log.Printf("meridian listening on %s:%d (LAN: %s) llm=%s ml=%s serving=%s", o.Host, o.Port, lanURL(o.Port), llmState, mlState, serving)
+	log.Printf("meridian listening on %s:%d (LAN: %s) llm=%s ml=%s", o.Host, o.Port, lanURL(o.Port), llmState, mlState)
 	err := srv.ListenAndServe()
 	stop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), maxDuration(mlGrace, 60*time.Second))
 	defer cancel()
-	if arb != nil {
-		if err := arb.Close(shutdownCtx); err != nil {
-			log.Printf("arbiter shutdown: %v", err)
+	if llmRT != nil {
+		if err := llmRT.Stop(shutdownCtx); err != nil {
+			log.Printf("llm shutdown: %v", err)
 		}
-	} else {
-		if llmRT != nil {
-			if err := llmRT.Stop(shutdownCtx); err != nil {
-				log.Printf("llm shutdown: %v", err)
-			}
-		}
-		if mlRT != nil {
-			if err := mlRT.Stop(shutdownCtx); err != nil {
-				log.Printf("ml shutdown: %v", err)
-			}
+	}
+	if mlRT != nil {
+		if err := mlRT.Stop(shutdownCtx); err != nil {
+			log.Printf("ml shutdown: %v", err)
 		}
 	}
 	if errors.Is(err, http.ErrServerClosed) {
@@ -248,7 +188,7 @@ func withCORS(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Conversation-ID, X-Meridian-Routing-Policy, X-Request-ID")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Meridian-Worker, X-Meridian-Model, X-Meridian-Routing-Policy, X-Meridian-Mode, X-Meridian-Phase")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Meridian-Worker, X-Meridian-Model, X-Meridian-Routing-Policy")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -271,14 +211,13 @@ func handleSetDefaultPolicy(pool *Pool, w http.ResponseWriter, r *http.Request) 
 	handlePolicies(pool, w)
 }
 
-func handleCatalog(pool *Pool, mlRT *mlRuntime, arb *arbiter.Arbiter, servingMode string) http.HandlerFunc {
+func handleCatalog(pool *Pool, mlRT *mlRuntime) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		out := api.CatalogResponse{
 			LLM:                  []api.CatalogModel{},
 			ML:                   []api.CatalogModel{},
 			RoutingPolicies:      []api.RoutingPolicyInfo{},
 			DefaultRoutingPolicy: "",
-			ServingMode:          servingMode,
 		}
 		if pool != nil {
 			out.LLM = pool.ModelCatalog()
@@ -287,9 +226,6 @@ func handleCatalog(pool *Pool, mlRT *mlRuntime, arb *arbiter.Arbiter, servingMod
 		}
 		if mlRT != nil {
 			out.ML = mlRT.Catalog()
-		}
-		if arb == nil {
-			out.ServingMode = "single"
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		api.WriteJSON(w, http.StatusOK, out)

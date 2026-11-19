@@ -48,7 +48,7 @@ func TestReserveFailsInsufficientRAM(t *testing.T) {
 
 func TestUnknownVRAMIsNotUnlimited(t *testing.T) {
 	m := NewManager(ResourcesConfig{}, fakeProbe(4096, 8192, 0, 0, false))
-	_, ok, reason := m.Reserve("img", KindImageGeneration, 0, 6144, 1024)
+	_, ok, reason := m.Reserve("img", KindOCR, 0, 6144, 1024)
 	if ok {
 		t.Fatal("GPU-backed reservation must fail when VRAM is unknown")
 	}
@@ -107,7 +107,7 @@ func TestProtectLLMPolicyNeverSignalsLLM(t *testing.T) {
 	m := NewManager(ResourcesConfig{RAMHeadroomMB: 1024}, fakeProbe(512, 1024, 0, 0, false))
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if _, ok, _ := m.Reserve("img", KindImageGeneration, 8192, 8192, 0); ok {
+		if _, ok, _ := m.Reserve("img", KindOCR, 8192, 8192, 0); ok {
 			t.Fatal("reservation should have been rejected")
 		}
 	}

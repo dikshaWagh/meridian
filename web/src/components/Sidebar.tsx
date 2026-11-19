@@ -1,12 +1,11 @@
-import type { Conversation, Mode } from '../types'
+import type { Conversation } from '../types'
 import type { Theme } from '../hooks/useTheme'
-import { ChevronDown, Moon, Plus, Sun, Trash, X } from './Icons'
+import { Moon, Plus, Sun, Trash, X } from './Icons'
 import { CompassMark } from './CompassMark'
 
 interface SidebarProps {
   conversations: Conversation[]
   activeId: string
-  mode: Mode | undefined
   connected: boolean
   theme: Theme
   open: boolean
@@ -17,16 +16,9 @@ interface SidebarProps {
   onToggleTheme: () => void
 }
 
-const modeLabel: Record<Mode, string> = {
-  idle: 'Starting',
-  llm: 'Chat',
-  ml: 'ML Studio',
-}
-
 export function Sidebar({
   conversations,
   activeId,
-  mode,
   connected,
   theme,
   open,
@@ -46,7 +38,7 @@ export function Sidebar({
           </div>
           <div className="brand-text">
             <div className="brand-name">Meridian</div>
-            <div className="brand-sub">Exclusive AI serving</div>
+            <div className="brand-sub">Private local AI</div>
           </div>
           <button className="icon-button sidebar-close" onClick={onClose} aria-label="Close sidebar">
             <X size={18} />
@@ -101,8 +93,6 @@ export function Sidebar({
           <div className="status-line" title={connected ? 'Live updates connected' : 'Reconnecting to server'}>
             <span className={`dot ${connected ? 'live' : 'off'}`} />
             <span>{connected ? 'Live' : 'Reconnecting'}</span>
-            <span className="status-sep">·</span>
-            <span>{modeLabel[mode ?? 'idle']}</span>
           </div>
           <button
             className="icon-button theme-toggle"
@@ -113,10 +103,7 @@ export function Sidebar({
             {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
           </button>
         </div>
-        <div className="sidebar-footnote">
-          <ChevronDown size={12} />
-          One accelerator, one active subsystem.
-        </div>
+        <div className="sidebar-footnote">Chat and OCR run on your own hardware.</div>
       </aside>
     </>
   )

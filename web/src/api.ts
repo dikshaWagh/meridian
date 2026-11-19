@@ -1,11 +1,4 @@
-import type {
-  Catalog,
-  ImageRequest,
-  ImageResult,
-  OCRResult,
-  SystemState,
-  Mode,
-} from './types'
+import type { Catalog, OCRResult } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -44,20 +37,8 @@ async function asJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T
 }
 
-export function fetchState(): Promise<SystemState> {
-  return fetch('/v1/system/state', { cache: 'no-store' }).then((r) => asJson<SystemState>(r))
-}
-
 export function fetchCatalog(): Promise<Catalog> {
   return fetch('/v1/catalog', { cache: 'no-store' }).then((r) => asJson<Catalog>(r))
-}
-
-export function requestMode(mode: Exclude<Mode, 'idle'>): Promise<SystemState> {
-  return fetch('/v1/system/mode', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode }),
-  }).then((r) => asJson<SystemState>(r))
 }
 
 export function setDefaultPolicy(name: string): Promise<unknown> {
@@ -66,26 +47,6 @@ export function setDefaultPolicy(name: string): Promise<unknown> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   }).then((r) => asJson<unknown>(r))
-}
-
-// subscribeSystem streams arbiter state transitions. EventSource reconnects on
-// its own; the callback reports connection health for the status pill.
-export function subscribeSystem(
-  onState: (state: SystemState) => void,
-  onConnection?: (connected: boolean) => void,
-): () => void {
-  const source = new EventSource('/v1/system/events')
-  source.addEventListener('open', () => onConnection?.(true))
-  source.addEventListener('state', (event) => {
-    try {
-      const payload = JSON.parse((event as MessageEvent).data) as { state: SystemState }
-      if (payload?.state) onState(payload.state)
-    } catch {
-      // Ignore malformed frames and keep the stream alive.
-    }
-  })
-  source.addEventListener('error', () => onConnection?.(false))
-  return () => source.close()
 }
 
 interface StreamChatOptions {
@@ -166,15 +127,6 @@ export async function runOCR(file: File): Promise<OCRResult> {
   form.append('file', file)
   const res = await fetch('/v1/ocr', { method: 'POST', body: form })
   return asJson<OCRResult>(res)
-}
-
-export async function generateImage(request: ImageRequest): Promise<ImageResult> {
-  const res = await fetch('/v1/images/generations', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  })
-  return asJson<ImageResult>(res)
 }
 
 export { errorMessage }

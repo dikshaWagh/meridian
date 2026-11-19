@@ -336,6 +336,7 @@ func (p *Pool) ModelStarting(model string) bool {
 	}
 	return false
 }
+
 // Models returns model ids with at least one healthy worker.
 func (p *Pool) Models() []string {
 	seen := map[string]bool{}
@@ -358,7 +359,7 @@ func (p *Pool) ModelCatalog() []api.CatalogModel {
 		return []api.CatalogModel{}
 	}
 	type agg struct {
-		model           string
+		model                      string
 		workers, healthy, starting int
 	}
 	order := []string{}

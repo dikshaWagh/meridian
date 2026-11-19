@@ -105,7 +105,7 @@ export function ChatView({
               <Sparkle size={30} />
             </div>
             <h1>How can I help?</h1>
-            <p>Chat with a local model. When you need vision or image generation, switch to ML Studio — Meridian keeps only one subsystem resident at a time.</p>
+            <p>Chat with a local model. Open Documents when you need to extract text from a scan or screenshot.</p>
             <div className="suggestions">
               {suggestions.map((suggestion) => (
                 <button

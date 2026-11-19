@@ -14,7 +14,6 @@ build: web server
 
 server:
 	$(GO) build -o $(BIN)/meridian-server ./cmd/meridian-server
-	$(GO) build -o $(BIN)/meridian-tui ./cmd/meridian-tui
 	$(GO) build -o $(BIN)/meridian-stress ./cmd/meridian-stress
 
 web:
@@ -28,7 +27,7 @@ vet:
 	$(GO) vet ./...
 
 race:
-	$(GO) test -race ./internal/arbiter ./internal/balancer ./internal/ml
+	$(GO) test -race ./internal/balancer ./internal/ml
 
 # Serve real llama-server workers. Set MODELS_DIR and LLAMA_BIN for your host.
 MODELS_DIR ?= ~/models

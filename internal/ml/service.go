@@ -152,7 +152,6 @@ type Service struct {
 	cfg          *Config
 	res          *Manager
 	workers      []*WorkerHandle
-	artifacts    string
 	ctx          context.Context
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
@@ -213,15 +212,6 @@ func Start(parent context.Context, cfg *Config, opts Options) (*Service, error) 
 		logger:     logger,
 	}
 
-	if cfg.ImageGeneration != nil && cfg.ImageGeneration.Enabled {
-		if err := os.MkdirAll(cfg.ImageGeneration.OutputDir, 0o755); err != nil {
-			cancel()
-			os.RemoveAll(tmpDir)
-			return nil, fmt.Errorf("ml: create artifact dir %q: %w", cfg.ImageGeneration.OutputDir, err)
-		}
-		s.artifacts = cfg.ImageGeneration.OutputDir
-	}
-
 	if cfg.OCR != nil && cfg.OCR.Enabled {
 		o := cfg.OCR
 		s.workers = append(s.workers, s.newHandle(&WorkerHandle{
@@ -245,47 +235,9 @@ func Start(parent context.Context, cfg *Config, opts Options) (*Service, error) 
 			},
 		}, o.ExpectedRAMMB, o.ExpectedVRAMMB, 0))
 	}
-	if cfg.ImageGeneration != nil && cfg.ImageGeneration.Enabled {
-		g := cfg.ImageGeneration
-		s.workers = append(s.workers, s.newHandle(&WorkerHandle{
-			ID:           "ml-image-1",
-			Kind:         KindImageGeneration,
-			ModelID:      g.ModelID,
-			Engine:       g.Engine,
-			Device:       g.Device,
-			Port:         g.Port,
-			Concurrency:  g.Concurrency,
-			startTimeout: time.Duration(g.StartupTimeoutSeconds) * time.Second,
-			cfg: WorkerConfig{
-				Kind:           KindImageGeneration,
-				ModelID:        g.ModelID,
-				Engine:         g.Engine,
-				Device:         g.Device,
-				ModelPath:      g.ModelPath,
-				ServerURL:      g.ServerURL,
-				ServerCommand:  g.ServerCommand,
-				ServerArgs:     g.ServerArgs,
-				CFGScale:       g.CFGScale,
-				Concurrency:    g.Concurrency,
-				MaxWidth:       g.MaxWidth,
-				MaxHeight:      g.MaxHeight,
-				MaxSteps:       g.MaxSteps,
-				DefaultSteps:   g.DefaultSteps,
-				MaxPromptChars: g.MaxPromptChars,
-			},
-		}, g.ExpectedRAMMB, g.ExpectedVRAMMB, g.RequestOverheadVRAMMB))
-	}
 
 	for _, h := range s.workers {
 		h.setState(StateStarting)
-		if reason := backendUnavailableReason(h.cfg); reason != "" {
-			// Report the native-binding blocker immediately instead of spawning a
-			// child that would exit.
-			h.setState(StateExited)
-			h.setError(reason)
-			logger.Printf("ml worker %s unavailable: %s", h.ID, reason)
-			continue
-		}
 		if err := portAvailable(h.Port); err != nil {
 			h.setState(StateResourceBlocked)
 			h.setError("worker_start_failed: " + err.Error())
@@ -551,7 +503,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	s.shuttingDown.Store(true)
 
-	// Let in-flight OCR/image requests finish before stopping workers.
+	// Let in-flight OCR requests finish before stopping workers.
 	for s.inFlight() > 0 {
 		if ctx.Err() != nil {
 			break

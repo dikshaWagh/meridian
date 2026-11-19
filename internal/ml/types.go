@@ -1,6 +1,6 @@
-// Package ml implements Meridian's independent ML serving subsystem (OCR and
-// image generation). It deliberately does not import internal/balancer: the ML
-// control plane shares only the public HTTP listener with the LLM subsystem.
+// Package ml implements Meridian's independent OCR serving subsystem. It
+// deliberately does not import internal/balancer: the ML control plane shares
+// only the public HTTP listener with the LLM subsystem.
 package ml
 
 import "errors"
@@ -8,8 +8,7 @@ import "errors"
 type Kind string
 
 const (
-	KindOCR             Kind = "ocr"
-	KindImageGeneration Kind = "image-generation"
+	KindOCR Kind = "ocr"
 )
 
 // Worker/model lifecycle states.
@@ -32,7 +31,6 @@ var (
 	ErrNoHealthyWorker  = errors.New("no healthy ml worker")
 	ErrAllWorkersBusy   = errors.New("all ml workers are busy")
 	ErrInferenceTimeout = errors.New("ml inference timed out")
-	ErrArtifactNotFound = errors.New("artifact not found")
 )
 
 // BBox is a text bounding box in image pixel coordinates.
@@ -65,51 +63,6 @@ type OCRResponse struct {
 	Text         string    `json:"text"`
 	Lines        []OCRLine `json:"lines"`
 	ProcessingMS int64     `json:"processing_ms"`
-}
-
-// ImageGenerationRequest is accepted by the public API and forwarded to a worker.
-type ImageGenerationRequest struct {
-	Model          string `json:"model,omitempty"`
-	Prompt         string `json:"prompt"`
-	NegativePrompt string `json:"negative_prompt,omitempty"`
-	Width          int    `json:"width,omitempty"`
-	Height         int    `json:"height,omitempty"`
-	Steps          int    `json:"steps,omitempty"`
-	Seed           int64  `json:"seed,omitempty"`
-	N              int    `json:"n,omitempty"`
-}
-
-// GeneratedImage is produced by an image-generation backend.
-type GeneratedImage struct {
-	Model  string
-	PNG    []byte
-	Width  int
-	Height int
-	Steps  int
-	Seed   int64
-}
-
-// WorkerImageResponse is the worker -> parent transport shape.
-type WorkerImageResponse struct {
-	Model     string `json:"model"`
-	PNGBase64 string `json:"png_base64"`
-	Width     int    `json:"width"`
-	Height    int    `json:"height"`
-	Steps     int    `json:"steps"`
-	Seed      int64  `json:"seed"`
-}
-
-// ImageGenerationResponse is the public /v1/images/generations response.
-type ImageGenerationResponse struct {
-	ID           string `json:"id"`
-	Model        string `json:"model"`
-	URL          string `json:"url"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	Steps        int    `json:"steps"`
-	Seed         int64  `json:"seed"`
-	Created      int64  `json:"created"`
-	ProcessingMS int64  `json:"processing_ms"`
 }
 
 // ModelStatus is one entry in GET /v1/ml/models.

@@ -147,8 +147,7 @@ func (r *mlRuntime) Stop(ctx context.Context) error {
 	return svc.Shutdown(ctx)
 }
 
-// Catalog returns the configured ML models even while the ML subsystem is
-// stopped, so the UI can offer them before a mode switch.
+// Catalog returns the configured ML models and their current state.
 func (r *mlRuntime) Catalog() []api.CatalogModel {
 	r.mu.Lock()
 	cfg, svc := r.cfg, r.svc
@@ -162,7 +161,7 @@ func (r *mlRuntime) Catalog() []api.CatalogModel {
 			states[m.ID] = m
 		}
 	}
-	out := make([]api.CatalogModel, 0, 2)
+	out := make([]api.CatalogModel, 0, 1)
 	add := func(modelID string, kind ml.Kind, engine, device string, enabled bool) {
 		if !enabled || modelID == "" {
 			return
@@ -188,9 +187,6 @@ func (r *mlRuntime) Catalog() []api.CatalogModel {
 	}
 	if o := cfg.OCR; o != nil {
 		add(o.ModelID, ml.KindOCR, o.Engine, o.Device, o.Enabled)
-	}
-	if g := cfg.ImageGeneration; g != nil {
-		add(g.ModelID, ml.KindImageGeneration, g.Engine, g.Device, g.Enabled)
 	}
 	return out
 }

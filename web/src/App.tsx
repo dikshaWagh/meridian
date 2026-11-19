@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, errorMessage, setDefaultPolicy, streamChat } from './api'
+import { errorMessage, setDefaultPolicy, streamChat } from './api'
 import type { ChatMessage } from './types'
 import { useConversations } from './hooks/useConversations'
 import { useSystem } from './hooks/useSystem'
 import { useTheme, useToasts } from './hooks/useTheme'
 import { Sidebar } from './components/Sidebar'
-import { ModeSwitch } from './components/ModeSwitch'
 import { ChatView } from './components/ChatView'
 import { MLStudio } from './components/MLStudio'
-import { TransitionScreen } from './components/TransitionScreen'
 import { ToastStack } from './components/ToastStack'
-import { Cpu, Menu } from './components/Icons'
+import { Menu } from './components/Icons'
+
+type View = 'chat' | 'documents'
 
 function uid(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
@@ -36,7 +36,7 @@ function storedPolicy(): string {
 export default function App() {
   const { theme, toggle } = useTheme()
   const { toasts, push, dismiss } = useToasts()
-  const system = useSystem()
+  const { catalog, connected, error: systemError, refreshCatalog } = useSystem()
   const conversations = useConversations()
   const {
     active,
@@ -53,14 +53,11 @@ export default function App() {
   const [policy, setPolicy] = useState(storedPolicy)
   const [streaming, setStreaming] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [view, setView] = useState<View>('chat')
   const abortRef = useRef<AbortController | null>(null)
   const lastErrorRef = useRef('')
 
-  const state = system.state
-  const catalog = system.catalog
   const activeModel = active?.model || catalog?.llm[0]?.id || ''
-  const transitioning = !state || state.switching || state.phase !== 'active'
-  const mode = state?.mode ?? 'idle'
 
   useEffect(() => {
     if (!policy && catalog?.default_routing_policy) {
@@ -82,42 +79,29 @@ export default function App() {
   }, [catalog, ensureModel])
 
   useEffect(() => {
-    if (system.error && system.error !== lastErrorRef.current) {
-      lastErrorRef.current = system.error
-      push(system.error, 'error')
+    if (systemError && systemError !== lastErrorRef.current) {
+      lastErrorRef.current = systemError
+      push(systemError, 'error')
     }
-  }, [system.error, push])
+  }, [systemError, push])
 
   useEffect(() => {
     return () => abortRef.current?.abort()
   }, [])
 
-  const switchMode = useCallback(
-    async (next: 'llm' | 'ml') => {
-      if (state?.switching || state?.mode === next) return
-      abortRef.current?.abort()
-      try {
-        await system.switchTo(next)
-      } catch (err) {
-        push(errorMessage(err), 'error')
-      }
-    },
-    [state?.switching, state?.mode, system, push],
-  )
-
   const handleNewConversation = useCallback(() => {
     createConversation(activeModel)
+    setView('chat')
     setSidebarOpen(false)
-    if (state?.mode === 'ml') void switchMode('llm')
-  }, [activeModel, createConversation, state?.mode, switchMode])
+  }, [activeModel, createConversation])
 
   const handleSelectConversation = useCallback(
     (id: string) => {
       setActiveId(id)
+      setView('chat')
       setSidebarOpen(false)
-      if (state?.mode === 'ml') void switchMode('llm')
     },
-    [setActiveId, state?.mode, switchMode],
+    [setActiveId],
   )
 
   const sendMessage = useCallback(
@@ -127,10 +111,6 @@ export default function App() {
       const model = conversation.model || catalog?.llm[0]?.id
       if (!model) {
         push('No LLM model is available.', 'error')
-        return
-      }
-      if (state?.mode !== 'llm' || state.phase !== 'active') {
-        push('Switch to Chat before sending a message.', 'info')
         return
       }
 
@@ -207,18 +187,14 @@ export default function App() {
             ),
             updatedAt: Date.now(),
           }))
-          if (err instanceof ApiError && (err.type === 'mode_conflict' || err.type === 'switching')) {
-            push('Chat is not the active mode. Switch to Chat to continue.', 'info')
-          } else {
-            push(message, 'error')
-          }
+          push(message, 'error')
         }
       } finally {
         setStreaming(false)
         abortRef.current = null
       }
     },
-    [active, streaming, catalog, state?.mode, state?.phase, policy, updateConversation, push],
+    [active, streaming, catalog, policy, updateConversation, push],
   )
 
   const changePolicy = useCallback(
@@ -228,14 +204,14 @@ export default function App() {
       setPolicy(name)
       try {
         await setDefaultPolicy(name)
-        void system.refreshCatalog()
+        void refreshCatalog()
         push(`Routing policy set to ${name}.`, 'success')
       } catch (err) {
         setPolicy(previous)
         push(errorMessage(err), 'error')
       }
     },
-    [policy, system, push],
+    [policy, refreshCatalog, push],
   )
 
   const changeModel = useCallback(
@@ -250,8 +226,7 @@ export default function App() {
       <Sidebar
         conversations={allConversations}
         activeId={activeId}
-        mode={mode}
-        connected={system.connected}
+        connected={connected}
         theme={theme}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
@@ -267,26 +242,37 @@ export default function App() {
             <Menu size={20} />
           </button>
           <div className="topbar-title">
-            <span className="crumb">{mode === 'ml' ? 'ML Studio' : 'Chat'}</span>
+            <span className="crumb">{view === 'documents' ? 'Documents' : 'Chat'}</span>
             <span className="crumb-sep">/</span>
             <span className="crumb-current">
-              {mode === 'ml' ? 'Vision & generation' : (active?.title ?? 'New conversation')}
+              {view === 'documents' ? 'Document Analyzer' : (active?.title ?? 'New conversation')}
             </span>
           </div>
           <div className="topbar-actions">
-            <span className={`lease-badge ${state?.exclusive ? 'on' : ''}`} title="One subsystem holds the accelerator at a time">
-              <Cpu size={14} />
-              1 lease
-            </span>
-            <ModeSwitch state={state} onSelect={(next) => void switchMode(next)} />
+            <div className="view-tabs" role="tablist" aria-label="Workspace">
+              <button
+                role="tab"
+                aria-selected={view === 'chat'}
+                className={`view-tab ${view === 'chat' ? 'active' : ''}`}
+                onClick={() => setView('chat')}
+              >
+                Chat
+              </button>
+              <button
+                role="tab"
+                aria-selected={view === 'documents'}
+                className={`view-tab ${view === 'documents' ? 'active' : ''}`}
+                onClick={() => setView('documents')}
+              >
+                Documents
+              </button>
+            </div>
           </div>
         </header>
 
         <div className="main-content">
-          {transitioning ? (
-            <TransitionScreen state={state} onRetry={(next) => void switchMode(next)} />
-          ) : mode === 'ml' ? (
-            <MLStudio state={state} catalog={catalog} onToast={push} />
+          {view === 'documents' ? (
+            <MLStudio catalog={catalog} onToast={push} />
           ) : (
             <ChatView
               conversation={active}
@@ -294,7 +280,7 @@ export default function App() {
               policies={catalog?.routing_policies ?? []}
               policy={policy}
               streaming={streaming}
-              active={mode === 'llm'}
+              active
               onSend={(text) => void sendMessage(text)}
               onStop={() => abortRef.current?.abort()}
               onSelectModel={changeModel}

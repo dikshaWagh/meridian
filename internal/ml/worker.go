@@ -2,7 +2,6 @@ package ml
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,24 +21,14 @@ import (
 // WorkerConfig is the per-worker configuration written by the parent and
 // loaded by the `meridian-server ml-worker` child process.
 type WorkerConfig struct {
-	Kind           Kind     `json:"kind"`
-	ModelID        string   `json:"model_id"`
-	Engine         string   `json:"engine"`
-	Device         string   `json:"device"`
-	ModelPath      string   `json:"model_path,omitempty"`
-	ModelDir       string   `json:"model_dir,omitempty"`
-	ServerURL      string   `json:"server_url,omitempty"`
-	ServerCommand  string   `json:"server_command,omitempty"`
-	ServerArgs     []string `json:"server_args,omitempty"`
-	CFGScale       float64  `json:"cfg_scale,omitempty"`
-	Language       string   `json:"language,omitempty"`
-	Concurrency    int      `json:"concurrency"`
-	MaxUploadMB    int64    `json:"max_upload_mb,omitempty"`
-	MaxWidth       int      `json:"max_width,omitempty"`
-	MaxHeight      int      `json:"max_height,omitempty"`
-	MaxSteps       int      `json:"max_steps,omitempty"`
-	DefaultSteps   int      `json:"default_steps,omitempty"`
-	MaxPromptChars int      `json:"max_prompt_chars,omitempty"`
+	Kind        Kind   `json:"kind"`
+	ModelID     string `json:"model_id"`
+	Engine      string `json:"engine"`
+	Device      string `json:"device"`
+	ModelDir    string `json:"model_dir,omitempty"`
+	Language    string `json:"language,omitempty"`
+	Concurrency int    `json:"concurrency"`
+	MaxUploadMB int64  `json:"max_upload_mb,omitempty"`
 	// StartupDelayMS simulates model load time (used by tests).
 	StartupDelayMS int `json:"startup_delay_ms,omitempty"`
 }
@@ -53,7 +42,7 @@ func loadWorkerConfig(path string) (WorkerConfig, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return WorkerConfig{}, fmt.Errorf("parse worker config: %w", err)
 	}
-	if cfg.Kind != KindOCR && cfg.Kind != KindImageGeneration {
+	if cfg.Kind != KindOCR {
 		return WorkerConfig{}, fmt.Errorf("unsupported worker kind %q", cfg.Kind)
 	}
 	if cfg.ModelID == "" {
@@ -113,29 +102,14 @@ func newWorkerServer(cfg WorkerConfig) (*http.Server, func() error, error) {
 // newWorkerHandler loads the configured backend and returns the worker's
 // private HTTP handler. /ready stays 503 until the backend has loaded.
 func newWorkerHandler(cfg WorkerConfig) (http.Handler, func() error, error) {
-	var (
-		ocr          OCRBackend
-		imagegen     ImageGenerationBackend
-		closeBackend func() error
-	)
-	switch cfg.Kind {
-	case KindOCR:
-		b, err := newOCRBackend(cfg)
-		if err != nil {
-			return nil, nil, err
-		}
-		ocr = b
-		closeBackend = func() error { return b.Close() }
-	case KindImageGeneration:
-		b, err := newImageGenerationBackend(cfg)
-		if err != nil {
-			return nil, nil, err
-		}
-		imagegen = b
-		closeBackend = func() error { return b.Close() }
-	default:
+	if cfg.Kind != KindOCR {
 		return nil, nil, fmt.Errorf("unsupported worker kind %q", cfg.Kind)
 	}
+	ocr, err := newOCRBackend(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	closeBackend := func() error { return ocr.Close() }
 
 	var ready atomic.Bool
 	if cfg.StartupDelayMS > 0 {
@@ -159,68 +133,29 @@ func newWorkerHandler(cfg WorkerConfig) (http.Handler, func() error, error) {
 		}
 		api.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
-
-	if cfg.Kind == KindOCR {
-		mux.HandleFunc("POST /v1/ocr", func(w http.ResponseWriter, r *http.Request) {
-			maxBytes := cfg.MaxUploadMB << 20
-			if maxBytes <= 0 {
-				maxBytes = 10 << 20
-			}
-			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
-			if err != nil {
-				api.WriteError(w, http.StatusRequestEntityTooLarge, "request_too_large", "image exceeds worker upload limit")
-				return
-			}
-			if !acquire(sem) {
-				api.WriteError(w, http.StatusServiceUnavailable, "worker_busy", "worker concurrency limit reached")
-				return
-			}
-			defer release(sem)
-			result, err := ocr.Recognize(r.Context(), raw)
-			if err != nil {
-				api.WriteError(w, http.StatusBadRequest, "invalid_request", err.Error())
-				return
-			}
-			result.Model = cfg.ModelID
-			api.WriteJSON(w, http.StatusOK, result)
-		})
-	} else {
-		mux.HandleFunc("POST /v1/images/generations", func(w http.ResponseWriter, r *http.Request) {
-			raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-			if err != nil {
-				api.WriteError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
-				return
-			}
-			var req ImageGenerationRequest
-			if err := json.Unmarshal(raw, &req); err != nil {
-				api.WriteError(w, http.StatusBadRequest, "invalid_request", "body is not valid JSON")
-				return
-			}
-			if err := normalizeImageRequest(&req, cfg); err != nil {
-				api.WriteError(w, http.StatusBadRequest, "invalid_request", err.Error())
-				return
-			}
-			if !acquire(sem) {
-				api.WriteError(w, http.StatusServiceUnavailable, "worker_busy", "worker concurrency limit reached")
-				return
-			}
-			defer release(sem)
-			img, err := imagegen.Generate(r.Context(), req)
-			if err != nil {
-				api.WriteError(w, http.StatusInternalServerError, "upstream_error", err.Error())
-				return
-			}
-			img.Model = cfg.ModelID
-			api.WriteJSON(w, http.StatusOK, WorkerImageResponse{
-				Model:     cfg.ModelID,
-				PNGBase64: base64.StdEncoding.EncodeToString(img.PNG),
-				Width:     img.Width,
-				Height:    img.Height,
-				Steps:     img.Steps,
-				Seed:      img.Seed,
-			})
-		})
-	}
+	mux.HandleFunc("POST /v1/ocr", func(w http.ResponseWriter, r *http.Request) {
+		maxBytes := cfg.MaxUploadMB << 20
+		if maxBytes <= 0 {
+			maxBytes = 10 << 20
+		}
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
+		if err != nil {
+			api.WriteError(w, http.StatusRequestEntityTooLarge, "request_too_large", "image exceeds worker upload limit")
+			return
+		}
+		if !acquire(sem) {
+			api.WriteError(w, http.StatusServiceUnavailable, "worker_busy", "worker concurrency limit reached")
+			return
+		}
+		defer release(sem)
+		result, err := ocr.Recognize(r.Context(), raw)
+		if err != nil {
+			api.WriteError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		result.Model = cfg.ModelID
+		api.WriteJSON(w, http.StatusOK, result)
+	})
 	return mux, closeBackend, nil
 }
 
@@ -234,41 +169,6 @@ func acquire(sem chan struct{}) bool {
 }
 
 func release(sem chan struct{}) { <-sem }
-
-// normalizeImageRequest fills defaults and validates worker-side limits.
-func normalizeImageRequest(req *ImageGenerationRequest, cfg WorkerConfig) error {
-	if req.Width == 0 {
-		req.Width = 512
-	}
-	if req.Height == 0 {
-		req.Height = 512
-	}
-	if req.Steps == 0 {
-		req.Steps = cfg.DefaultSteps
-	}
-	if req.Width <= 0 || req.Height <= 0 {
-		return fmt.Errorf("width and height must be positive")
-	}
-	if req.Width%8 != 0 || req.Height%8 != 0 {
-		return fmt.Errorf("width and height must be multiples of 8")
-	}
-	if cfg.MaxWidth > 0 && req.Width > cfg.MaxWidth {
-		return fmt.Errorf("width %d exceeds maximum %d", req.Width, cfg.MaxWidth)
-	}
-	if cfg.MaxHeight > 0 && req.Height > cfg.MaxHeight {
-		return fmt.Errorf("height %d exceeds maximum %d", req.Height, cfg.MaxHeight)
-	}
-	if req.Steps < 1 || (cfg.MaxSteps > 0 && req.Steps > cfg.MaxSteps) {
-		return fmt.Errorf("steps must be between 1 and %d", cfg.MaxSteps)
-	}
-	if req.Prompt == "" {
-		return fmt.Errorf("prompt is required")
-	}
-	if cfg.MaxPromptChars > 0 && len(req.Prompt) > cfg.MaxPromptChars {
-		return fmt.Errorf("prompt exceeds %d characters", cfg.MaxPromptChars)
-	}
-	return nil
-}
 
 // workerConfigJSON serialises the child config.
 func workerConfigJSON(cfg WorkerConfig) ([]byte, error) {

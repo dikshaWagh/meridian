@@ -1,22 +1,18 @@
-# Meridian ML serving configuration (OCR + Stable Diffusion image generation)
+# Meridian OCR serving configuration
 #
-# The default configuration uses the deterministic "fake" engines so the ML
-# subsystem can be exercised on any machine without model weights or a GPU:
+# The default configuration uses the deterministic "fake" engine so the OCR
+# subsystem can be exercised on any machine without model weights:
 #
 #   ./bin/meridian-server serve --enable-llm=false --enable-ml=true \
 #       --ml-config ./configs/ml.yaml
 #
-# To use native inference, switch `engine` to `onnxruntime` (OCR) or
-# `stable-diffusion.cpp` (image generation), supply the local model path and
-# install a validated Go binding plus the native shared library. See README.md;
-# this build reports those engines as unavailable and blocks only that worker.
-# For real image generation today use configs/ml-sd-server.yaml, which proxies
-# to a local stable-diffusion.cpp `sd-server` with engine: stable-diffusion-server.
+# For real OCR switch `engine` to `tesseract`, which shells out to the
+# tesseract binary on PATH. See configs/laptop-real.yaml.
 
 listen_host: 127.0.0.1
 
-# protect-llm: ML workers are admitted only when their declared budgets fit.
-# Meridian never stops or evicts an LLM worker to make room for an ML model.
+# protect-llm: OCR workers are admitted only when their declared budgets fit.
+# Meridian never stops or evicts an LLM worker to make room for OCR.
 resource_policy: protect-llm
 
 resources:
@@ -25,43 +21,20 @@ resources:
   protected_llm_vram_mb: 1024
   gpu_probe: auto   # auto | off. Unknown VRAM is never treated as unlimited.
 
-# Grace period for draining in-flight ML requests on shutdown, before SIGTERM.
+# Grace period for draining in-flight OCR requests on shutdown, before SIGTERM.
 shutdown_grace_seconds: 10
 
 ocr:
   enabled: true
   model_id: pp-ocrv5-mobile-en
-  engine: fake       # fake | onnxruntime
+  engine: fake       # fake | tesseract
   device: cpu
   model_dir: ./models/ocr/pp-ocrv5-mobile-en
   # Declared peak budgets used for admission control (not inferred from file size).
-  # The fake engine needs little; a real ONNX PaddleOCR worker typically declares 1024.
+  # The fake engine needs little; a real tesseract worker typically declares 300.
   expected_ram_mb: 256
   expected_vram_mb: 0
   concurrency: 2
   port: 8091
   max_upload_mb: 10
-  startup_timeout_seconds: 60
-
-image_generation:
-  enabled: true
-  model_id: stable-diffusion-v1-5
-  engine: fake       # fake | stable-diffusion.cpp
-  device: cpu
-  model_path: ./models/stable-diffusion/model.safetensors
-  # The fake engine needs little; a real SD 1.5 worker typically declares
-  # expected_ram_mb: 2048 and expected_vram_mb: 6144 with a VRAM probe available.
-  expected_ram_mb: 512
-  expected_vram_mb: 0
-  request_overhead_vram_mb: 0
-  concurrency: 1
-  port: 8092
-  # Generated PNGs are written here; GET /v1/artifacts/{id} serves them.
-  output_dir: ./data/generated
-  max_width: 768
-  max_height: 768
-  max_steps: 40
-  default_steps: 25
-  max_prompt_chars: 2000
-  timeout_seconds: 300
   startup_timeout_seconds: 60

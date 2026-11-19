@@ -11,8 +11,7 @@ can reduce deployment cost (RAM, latency, energy) without unacceptable quality l
 **Build order:** single-machine fault tolerance first, then single-leader distributed cluster.
 
 Roadmap & DeepSeek build files: `docs/00-overview-and-roadmap.md` + `docs/01-` to `docs/05-`
-(see §7). Older audits `docs/01-trim-the-fat-audit.md`, `docs/02-pivot-plan-and-wrapper-defense.md`
-are superseded by the phase files.
+(see §3). Superseded audits and implementation notes live in `docs/archive/`.
 
 ---
 
@@ -81,20 +80,18 @@ Inference 35s, gateway <1ms => leader never bottleneck.
 cmd/
   meridian-server/   Gateway (serve | ml-worker) — leader
   meridian-stress/   Multi-turn p50/p95/p99 + tok/s + fault injection
-  meridian-tui/      [DELETE in Phase 0] optional terminal client
 internal/
   api/               OpenAI-compatible + WorkerStatus/Catalog contracts
   balancer/          pool, session, routing, handler, supervisor
                      + NEW cost_aware.go, complexity.go (Phase 2)
   tokens/            O(n) estimator (~4 chars/token, template overhead)
-  ml/                OCR supervisor only (tesseract/fake), /proc/meminfo admission
+  ml/                OCR supervisor only (fake/tesseract), /proc/meminfo admission
   metrics/           JSONL telemetry: latency, tokens, worker, status (no PII)
   webui/             go:embed all:dist
-  arbiter/           [DELETED Phase 0] former exclusive LLM<->ML switcher
-web/                 React+TS+Vite: Chat, Document Analyzer (OCR->LLM), cluster status
+web/                 React+TS+Vite: Chat + Document Analyzer (OCR), cluster status
 configs/
   ml.yaml            fake OCR (tests)
-  laptop-real.yaml   real tesseract + small/premium GGUFs (no image_generation)
+  laptop-real.yaml   real tesseract OCR
   cluster.yaml       [NEW Phase 3] leader worker list: id/model/host/port/file/remote
 docs/
   00-overview-and-roadmap.md     Product claim + phase order (read first)
@@ -103,8 +100,12 @@ docs/
   03-phase-2-intelligent-workload-allocation.md
   04-phase-3-leader-multi-node-distribution.md
   05-phase-4-test-pitch-and-report.md
-  01-trim-the-fat-audit.md, 02-pivot-plan-*.md  [SUPERSEDED, archive]
+  archive/                       superseded audits and implementation notes
 ```
+
+Phase 0 is complete: `internal/arbiter`, `internal/tui`, `cmd/meridian-tui`,
+exclusive mode switching, and image generation (`/v1/images/generations`,
+`/v1/artifacts/{id}`) are gone. LLM and OCR run concurrently.
 
 ---
 

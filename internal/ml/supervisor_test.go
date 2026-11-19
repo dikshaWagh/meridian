@@ -89,10 +89,8 @@ func testServiceConfig(t *testing.T) *Config {
 	t.Helper()
 	cfg := testConfig(t)
 	cfg.OCR.Port = freePort(t)
-	cfg.ImageGeneration.Port = freePort(t)
 	cfg.Resources.RAMHeadroomMB = 256
 	cfg.OCR.ExpectedRAMMB = 256
-	cfg.ImageGeneration.ExpectedRAMMB = 512
 	return cfg
 }
 
@@ -103,24 +101,19 @@ func TestSupervisorStartsWorkersAndShutsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 15*time.Second, "both workers ready", func() bool {
+	waitFor(t, 15*time.Second, "worker ready", func() bool {
 		models := svc.Models()
-		if len(models) != 2 {
+		if len(models) != 1 {
 			return false
 		}
-		for _, m := range models {
-			if !m.Healthy {
-				return false
-			}
-		}
-		return true
+		return models[0].Healthy
 	})
 
 	status := svc.Snapshot()
-	if len(status.Workers) != 2 {
+	if len(status.Workers) != 1 {
 		t.Fatalf("workers = %d", len(status.Workers))
 	}
-	pids := make([]int, 0, 2)
+	pids := make([]int, 0, 1)
 	for _, w := range status.Workers {
 		if w.PID <= 0 || w.State != StateReady || !w.Healthy {
 			t.Fatalf("unexpected worker status: %+v", w)
@@ -142,7 +135,6 @@ func TestSupervisorStartsWorkersAndShutsDown(t *testing.T) {
 
 func TestSupervisorDoesNotRestartInitFailure(t *testing.T) {
 	cfg := testServiceConfig(t)
-	cfg.ImageGeneration.Enabled = false
 	probe := fakeProbe(1<<20, 1<<20, 0, 0, false)
 	builder := func(h *WorkerHandle, configPath string) *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=TestHelperMLWorkerInitFailure", "--")
@@ -177,7 +169,6 @@ func TestSupervisorDoesNotRestartInitFailure(t *testing.T) {
 
 func TestSupervisorMarksPortConflictBlocked(t *testing.T) {
 	cfg := testServiceConfig(t)
-	cfg.ImageGeneration.Enabled = false
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.OCR.Port))
 	if err != nil {
@@ -216,7 +207,6 @@ func TestSupervisorMarksPortConflictBlocked(t *testing.T) {
 
 func TestSupervisorForceKillsAfterTimeout(t *testing.T) {
 	cfg := testServiceConfig(t)
-	cfg.ImageGeneration.Enabled = false
 	builder := func(h *WorkerHandle, configPath string) *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=TestHelperStubbornWorker", "--")
 		cmd.Env = append(os.Environ(),
@@ -283,48 +273,8 @@ func TestMLAdmissionKeepsLLMProcessAlive(t *testing.T) {
 	}
 }
 
-func TestNativeBackendBlockedWithClearError(t *testing.T) {
-	_, _, err := newWorkerHandler(WorkerConfig{Kind: KindOCR, ModelID: "x", Engine: EngineONNXRuntime, Concurrency: 1})
-	if err == nil || !strings.Contains(err.Error(), "unavailable in this build") {
-		t.Fatalf("expected clear native-backend blocker, got %v", err)
-	}
-	_, _, err = newWorkerHandler(WorkerConfig{Kind: KindImageGeneration, ModelID: "x", Engine: EngineStableDiffusionCPP, Concurrency: 1})
-	if err == nil || !strings.Contains(err.Error(), "unavailable in this build") {
-		t.Fatalf("expected clear native-backend blocker, got %v", err)
-	}
-}
-
-func TestStartBlocksNativeEngineWithoutSpawning(t *testing.T) {
-	cfg := testServiceConfig(t)
-	cfg.ImageGeneration.Enabled = false
-	cfg.OCR.Engine = EngineONNXRuntime
-	cfg.OCR.ModelDir = t.TempDir()
-
-	var spawned atomic.Bool
-	svc, err := Start(context.Background(), cfg, Options{
-		Probe: fakeProbe(1<<20, 1<<20, 0, 0, false),
-		CommandBuilder: func(h *WorkerHandle, p string) *exec.Cmd {
-			spawned.Store(true)
-			return exec.Command("false")
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = svc.Shutdown(ctx)
-	}()
-
-	status := svc.Snapshot()
-	if spawned.Load() {
-		t.Fatal("native engine must be blocked before spawning a child")
-	}
-	if status.Workers[0].State != StateExited {
-		t.Fatalf("state = %s, want exited", status.Workers[0].State)
-	}
-	if !strings.Contains(status.Workers[0].LastError, "unavailable in this build") {
-		t.Fatalf("LastError = %q", status.Workers[0].LastError)
+func TestUnknownEngineRejectedByWorker(t *testing.T) {
+	if _, _, err := newWorkerHandler(WorkerConfig{Kind: KindOCR, ModelID: "x", Engine: "onnxruntime", Concurrency: 1}); err == nil {
+		t.Fatal("expected unknown OCR engine to be rejected")
 	}
 }
