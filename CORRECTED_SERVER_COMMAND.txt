@@ -1,0 +1,264 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║                    ✅ FINAL CORRECTED SERVER COMMAND                      ║
+║                                                                            ║
+║                              (Tested & Working)                           ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+
+COMMAND TO RUN (Copy-Paste This)
+════════════════════════════════════════════════════════════════════════════
+
+cd /home/rudra/meridian && git pull origin main && make server
+
+# Then start the server:
+
+./bin/meridian-server serve \
+  --llm-model qwen2.5-1.5b-instruct-q4_k_m.gguf \
+  --llm-workers 2 \
+  --llama-bin /usr/local/lib/ollama/llama-server \
+  --models-dir ~/models \
+  --threads 8 \
+  --ctx 4096
+
+
+WHAT TO EXPECT
+════════════════════════════════════════════════════════════════════════════
+
+Output after ~10-15 seconds:
+
+  Starting workers...
+  worker w1 (...) is now starting
+  worker w2 (...) is now starting
+  [wait ~10 seconds]
+  worker w1 (...) is now healthy
+  worker w2 (...) is now healthy
+
+
+THEN (Keep server running, use other terminals for next steps)
+════════════════════════════════════════════════════════════════════════════
+
+SERVER TERMINAL 1: (Keep this running - server logs show here)
+  ✓ All done above
+
+SERVER TERMINAL 2: (Get IP and verify server works)
+  
+  # Get server IP
+  hostname -I
+  # Example: 192.168.1.100
+  
+  # Verify server is responding
+  curl http://localhost:8080/status | jq '.workers[] | {id, state}'
+  # Should show: healthy, healthy
+
+
+CLIENT MACHINE: (Any machine on same network)
+  
+  # Open browser:
+  http://192.168.1.100:8080/
+  # (replace 192.168.1.100 with actual IP from above)
+  
+  # You should see:
+  #   React UI dashboard
+  #   Status panel showing:
+  #     w1: healthy (green)
+  #     w2: healthy (green)
+
+
+TEST CONNECTION IN REACT UI
+════════════════════════════════════════════════════════════════════════════
+
+1. In React UI (client browser):
+   - Check "Conversation ID" checkbox
+   - Type: "Hello!"
+   - Click Send
+
+2. Watch Status Monitor (right panel):
+   - in_flight: briefly shows 1
+   - Response appears in chat
+   - tok_per_sec shows > 20
+
+✓ If this works, everything is connected!
+
+
+FAULT TOLERANCE TEST
+════════════════════════════════════════════════════════════════════════════
+
+STEP A: Server Terminal 2 - Start Load
+
+cd /home/rudra/meridian
+
+./bin/meridian-stress \
+  --addr http://127.0.0.1:8080 \
+  --concurrency 4 \
+  --conversations-per-model 10 &
+
+# This starts stress test in background
+
+
+STEP B: Client Browser - Monitor
+
+Watch Status Monitor (right side) for ~30 seconds:
+
+Expected:
+  w1: healthy, tok_per_sec: 40+, sessions: 5
+  w2: healthy, tok_per_sec: 35+, sessions: 5
+
+
+STEP C: Server Terminal 3 - Kill Worker
+
+ps aux | grep llama-server | grep -v grep
+
+# Output will be similar to:
+#   user 12345 ... llama-server ... (this is w1)
+#   user 12346 ... llama-server ... (this is w2)
+
+# Kill w2 (second one)
+kill -9 12346
+
+echo "✓ Worker 2 killed"
+
+
+STEP D: Client Browser - Watch Recovery (KEY MOMENT!)
+
+Status Monitor should update within ~2 seconds:
+
+BEFORE KILL:
+  w1: ✓ healthy, tok_per_sec: 42, sessions: 5
+  w2: ✓ healthy, tok_per_sec: 38, sessions: 5
+
+AFTER KILL:
+  w1: ✓ healthy, tok_per_sec: 45, sessions: 10 ← INCREASED!
+  w2: ✗ UNHEALTHY, tok_per_sec: 0, sessions: 0 ← NOW RED!
+
+
+✅ PHASE 1 FAULT TOLERANCE WORKS! 🎉
+
+
+STEP E: Verify Success (Server Terminal 2)
+
+# Stop stress test
+killall meridian-stress
+
+# Check migrations in logs
+tail -20 logs/requests.jsonl | grep "session moved"
+
+# Should show:
+#   session conv-xxx moved w2 -> w1 (reason: worker process exited)
+
+# Calculate success rate
+TOTAL=$(grep -c "status=200" logs/requests.jsonl)
+FAILED=$(grep "status=[45][0-9][0-9]" logs/requests.jsonl | grep -v "status=409" | wc -l)
+SUCCESS=$((100 * (TOTAL - FAILED) / TOTAL))
+
+echo "Total: $TOTAL"
+echo "Failed: $FAILED"
+echo "Success Rate: $SUCCESS%"
+
+# ✓ Should be >= 95%
+
+
+QUICK CHECKLIST
+════════════════════════════════════════════════════════════════════════════
+
+□ Server builds without errors
+□ Server starts and both workers become "healthy"
+□ Browser opens React UI at http://<SERVER_IP>:8080/
+□ Both workers show "healthy" (green) in Status panel
+□ Test message works (response appears in chat)
+□ Status monitor shows tok_per_sec > 20
+□ Stress test runs and creates load
+□ Sessions distributed across both workers
+□ After kill: w2 turns RED (unhealthy)
+□ After kill: w1 sessions increase (10+)
+□ After kill: messages still work
+□ Logs show "session moved" entries
+□ Success rate >= 95%
+
+✅ ALL CHECKED? PHASE 1 PASSES!
+
+
+TROUBLESHOOTING
+════════════════════════════════════════════════════════════════════════════
+
+Server won't start:
+  • Check model exists: ls ~/models/qwen*.gguf
+  • Check llama-server: which llama-server
+  • Check port free: lsof -i :8080
+
+Workers don't become healthy:
+  • Wait 15 seconds (startup grace period)
+  • Check server logs for errors
+
+React UI won't connect:
+  • Verify server IP: hostname -I
+  • Test connection: curl http://<SERVER_IP>:8080/healthz
+  • Check firewall: sudo ufw allow 8080
+
+Can't kill worker:
+  • List processes: ps aux | grep llama-server
+  • Should see 2 processes
+  • Kill second one: kill -9 <PID>
+
+
+WHAT YOU'LL SEE IN REACT UI
+════════════════════════════════════════════════════════════════════════════
+
+Status Monitor (right side, updates every 2 seconds):
+
+┌─────────────────────────┐
+│ Workers                 │
+├─────────────────────────┤
+│ w1 ✓ healthy            │
+│ Model: qwen2.5...       │
+│ State: healthy          │
+│ In Flight: 0            │
+│ Served: 42              │
+│ Est Tokens In Flight: 0 │
+│ Token Rate: 42.3 tok/s  │
+│ Sessions: 5             │
+│                         │
+│ w2 ✓ healthy            │
+│ Model: qwen2.5...       │
+│ State: healthy          │
+│ In Flight: 0            │
+│ Served: 38              │
+│ Est Tokens In Flight: 0 │
+│ Token Rate: 39.8 tok/s  │
+│ Sessions: 5             │
+└─────────────────────────┘
+
+AFTER KILLING W2:
+
+┌─────────────────────────┐
+│ w1 ✓ healthy            │
+│ ...                     │
+│ Token Rate: 45.2 tok/s  │ ← increased
+│ Sessions: 10            │ ← doubled
+│                         │
+│ w2 ✗ UNHEALTHY ← RED!   │
+│ ...                     │
+│ Token Rate: 0 tok/s     │
+│ Sessions: 0             │
+└─────────────────────────┘
+
+
+SUCCESS MEANS
+════════════════════════════════════════════════════════════════════════════
+
+✅ Killed one worker
+✅ React UI shows it as unhealthy (RED)
+✅ Sessions automatically migrated
+✅ No error messages
+✅ 95%+ success rate
+✅ Logs show "session moved" entries
+
+PHASE 1 FAULT TOLERANCE IS PROVEN!
+
+
+═════════════════════════════════════════════════════════════════════════════
+
+You're ready! Run the command at the top and enjoy watching Phase 1 in action.
+
+═════════════════════════════════════════════════════════════════════════════

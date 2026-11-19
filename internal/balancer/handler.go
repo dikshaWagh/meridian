@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -53,6 +54,15 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.wrote = true
 	s.ResponseWriter.WriteHeader(code)
 }
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if !s.wrote {
+		s.status = 200
+		s.wrote = true
+	}
+	return s.ResponseWriter.Write(b)
+}
+
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
@@ -197,10 +207,77 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 
 	r = r.WithContext(context.WithValue(r.Context(), usageKey{}, usage))
 
-	worker.Proxy.ServeHTTP(w, r)
+	// Single-retry failover (non-streaming only): if dial/reset fails before headers written,
+	// try once on a different worker.
+	if !req.Stream && rec.status == 0 {
+		worker.Proxy.ServeHTTP(w, r)
+		if rec.status >= 500 && !rec.wrote {
+			// Pre-header failure: try failover
+			log.Printf("worker %s failed pre-headers, attempting failover", worker.Spec.ID)
+			worker.recordFailure(errors.New("failover triggered"))
+
+			// Migrate session if bound to this worker
+			if convID != "" && sess != nil {
+				sess.mu.Lock()
+				oldWorkerID := sess.WorkerID
+				sess.mu.Unlock()
+
+				// Pick new worker
+				newWorker, _, newReservation, err := pool.PickForSessionWithPolicyReserved(req.Model, convID, policyName)
+				if err == nil && newWorker.Spec.ID != oldWorkerID {
+					sess.mu.Lock()
+					sess.WorkerID = newWorker.Spec.ID
+					sess.mu.Unlock()
+					log.Printf("session %s failover moved %s -> %s", convID, oldWorkerID, newWorker.Spec.ID)
+
+					// Retry: re-buffer body and proxy to new worker
+					if convID != "" && sess != nil {
+						sess.mu.Lock()
+						history := make([]api.Message, len(sess.Messages))
+						copy(history, sess.Messages)
+						sess.mu.Unlock()
+
+						retryReq := req
+						retryReq.Messages = append(history, req.Messages...)
+						retryRaw, _ := json.Marshal(retryReq)
+						r.Body = io.NopCloser(bytes.NewReader(retryRaw))
+						r.ContentLength = int64(len(retryRaw))
+					} else {
+						r.Body = io.NopCloser(bytes.NewReader(raw))
+						r.ContentLength = int64(len(raw))
+					}
+
+					w.Header().Set("X-Meridian-Failover", fmt.Sprintf("%s->%s", worker.Spec.ID, newWorker.Spec.ID))
+					worker = newWorker
+					reservation.Release()
+					reservation = newReservation
+					reservation.Commit()
+
+					// Clear rec for second attempt
+					rec.wrote = false
+					rec.status = 0
+					newWorker.Proxy.ServeHTTP(w, r)
+				} else {
+					newReservation.Release()
+				}
+			}
+		}
+	} else {
+		// Streaming or already wrote headers: no retry
+		worker.Proxy.ServeHTTP(w, r)
+	}
 
 	if rec.status < 500 {
 		worker.Served.Add(1)
+	}
+
+	// Update rolling token/s from actual usage
+	if usage.ok && rec.status == 200 {
+		elapsed := time.Since(start).Seconds()
+		if elapsed > 0 {
+			measured := float64(usage.out) / elapsed
+			worker.UpdateSpeed(measured)
+		}
 	}
 
 	if convID != "" && sess != nil && rec.status == 200 && r.Context().Err() == nil && usage.assistantMsg != nil {

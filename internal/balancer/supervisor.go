@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -64,6 +65,7 @@ func Run(o Options) error {
 	mlGrace := 10 * time.Second
 	if o.EnableLLM {
 		o.ModelsDir, _ = expandHome(o.ModelsDir)
+		log.Printf("models dir: %s", o.ModelsDir)
 		if err := preflight(o); err != nil {
 			return err
 		}
@@ -270,6 +272,17 @@ func modelPath(dir, file string) string {
 	return filepath.Join(dir, file)
 }
 
+// describePath reports why path is unusable. The underlying OS error is
+// included so a permission, mount, or SELinux denial is not mistaken for a
+// missing file.
+func describePath(path string, err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		err = pe.Err
+	}
+	return fmt.Sprintf("%q: %v", path, err)
+}
+
 func preflight(o Options) error {
 	var missing []string
 	seen := map[string]bool{}
@@ -278,18 +291,18 @@ func preflight(o Options) error {
 	}
 	if o.BackendLib != "" {
 		if _, err := os.Stat(o.BackendLib); err != nil {
-			missing = append(missing, o.BackendLib)
+			missing = append(missing, describePath(o.BackendLib, err))
 		}
 	}
 	for _, w := range workerSpecs(o) {
 		file := modelPath(o.ModelsDir, w.File)
 		if _, err := os.Stat(file); err != nil && !seen[file] {
-			missing = append(missing, file)
+			missing = append(missing, describePath(file, err))
 			seen[file] = true
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("preflight failed; missing:\n- %s", strings.Join(missing, "\n- "))
+		return fmt.Errorf("preflight failed; unusable:\n- %s", strings.Join(missing, "\n- "))
 	}
 	return nil
 }

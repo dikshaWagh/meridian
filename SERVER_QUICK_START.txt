@@ -1,0 +1,245 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║          MERIDIAN SERVER-CLIENT SETUP — ULTRA QUICK REFERENCE            ║
+║                                                                            ║
+║              Run server somewhere, access UI from client                  ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+
+QUICK SETUP (5 MINUTES)
+═════════════════════════════════════════════════════════════════════════════
+
+STEP 1: SERVER MACHINE — Build & Start
+
+cd /home/rudra/meridian
+git pull origin main
+make server
+
+# Get server IP (give this to client)
+hostname -I
+# Example: 192.168.1.100
+
+# Start server on port 8080 (accessible from network)
+./bin/meridian-server serve \
+  --llm-model qwen2.5-1.5b-instruct-q4_k_m.gguf \
+  --llm-workers 2 \
+  --llama-bin /usr/local/lib/ollama/llama-server \
+  --models-dir ~/models \
+  --threads 8 --ctx 4096
+
+# KEEP THIS TERMINAL OPEN
+# Wait for: "worker w1 is now healthy" + "worker w2 is now healthy"
+
+
+STEP 2: CLIENT MACHINE — Open Browser
+
+# Open browser and go to:
+http://192.168.1.100:8080/
+
+# Replace 192.168.1.100 with actual SERVER_IP from STEP 1
+
+# You should see:
+#   React UI dashboard
+#   Status panel on right (both workers: green "healthy")
+#   Chat interface on left
+
+
+STEP 3: TEST IN REACT UI (Before Fault Testing)
+
+1. Check "Conversation ID" checkbox
+2. Type: "What is 2+2?"
+3. Click Send
+4. Watch Status Monitor (right):
+   - in_flight briefly shows 1
+   - Response appears in chat
+   - tok_per_sec shows > 20
+
+✓ If this works, React UI is connected!
+
+
+STEP 4: FAULT TOLERANCE TEST (WITH REAL BEHAVIOR)
+
+─────────────────────────────────────────────────────────────────────────────
+ON SERVER MACHINE (Terminal 2):
+─────────────────────────────────────────────────────────────────────────────
+
+# Start stress test (creates multiple conversations)
+./bin/meridian-stress \
+  --addr http://127.0.0.1:8080 \
+  --concurrency 4 \
+  --conversations-per-model 10 &
+
+# Watch for 30 seconds...
+
+
+─────────────────────────────────────────────────────────────────────────────
+ON CLIENT MACHINE (Browser):
+─────────────────────────────────────────────────────────────────────────────
+
+# Watch Status Monitor on right:
+#   w1: healthy, sessions: 5, tok_per_sec: 42
+#   w2: healthy, sessions: 5, tok_per_sec: 39
+#
+# This shows load is distributed between both workers
+
+
+─────────────────────────────────────────────────────────────────────────────
+ON SERVER MACHINE (Terminal 3):
+─────────────────────────────────────────────────────────────────────────────
+
+# Find and kill worker 2
+ps aux | grep llama-server | grep -v grep
+# Output:
+#   user 12345 ... llama-server ... (w1)
+#   user 12346 ... llama-server ... (w2)
+
+# Kill w2
+kill -9 12346
+
+echo "✓ Killed worker 2"
+
+
+─────────────────────────────────────────────────────────────────────────────
+ON CLIENT MACHINE (Browser) — THE KEY MOMENT:
+─────────────────────────────────────────────────────────────────────────────
+
+# Watch Status Monitor update (within 2 seconds):
+
+BEFORE KILL:
+  w1: ✓ healthy, sessions: 5, tok_per_sec: 42
+  w2: ✓ healthy, sessions: 5, tok_per_sec: 39
+
+AFTER KILL:
+  w1: ✓ healthy, sessions: 10 ← doubled! (absorbed w2's sessions)
+  w2: ✗ unhealthy, sessions: 0  ← turned RED!
+       tok_per_sec: 0
+
+# This is FAULT TOLERANCE in action! 🎉
+
+
+─────────────────────────────────────────────────────────────────────────────
+ON SERVER MACHINE (Terminal 3) — Verify Success:
+─────────────────────────────────────────────────────────────────────────────
+
+# Stop stress test
+killall meridian-stress
+
+# Check logs
+tail -20 logs/requests.jsonl | grep "session moved"
+
+# Should show:
+# session conv-abc123 moved w2 -> w1 (reason: worker process exited)
+# session conv-def456 moved w2 -> w1 (reason: worker process exited)
+
+# Verify 95%+ success rate
+TOTAL=$(grep -c "status=200" logs/requests.jsonl)
+FAILED=$(grep "status=[45][0-9][0-9]" logs/requests.jsonl | grep -v "status=409" | wc -l)
+echo "Success: $((100 * (TOTAL - FAILED) / TOTAL))%"
+
+
+WHAT YOU'LL SEE IN REACT UI
+═════════════════════════════════════════════════════════════════════════════
+
+1. BEFORE KILL:
+   ✓ Both workers healthy (green)
+   ✓ Status shows requests flowing
+   ✓ tok_per_sec shows actual throughput (~35-45)
+   ✓ Sessions distributed (5 each)
+
+2. IMMEDIATELY AFTER KILL:
+   ✗ w2 turns RED (unhealthy)
+   ✓ w1 sessions double (10)
+   ✓ w1 tok_per_sec increases (~45-50)
+   ✓ Any requests to w2 auto-retry on w1
+
+3. DURING STRESS TEST:
+   ✓ Requests keep flowing
+   ✓ No error messages
+   ✓ Chat still works (no visible pause)
+
+
+TROUBLESHOOTING
+═════════════════════════════════════════════════════════════════════════════
+
+React UI shows "No connection" or red X:
+  → Check: ping <SERVER_IP>
+  → Check: curl http://<SERVER_IP>:8080/healthz
+  → Server firewall: sudo ufw allow 8080
+
+Workers show "starting" (not "healthy"):
+  → Wait 10-15 seconds
+  → Check: llama-server binary exists
+  → Check: model file exists in ~/models
+
+Stress test doesn't create load:
+  → Try manual request:
+    curl -X POST http://127.0.0.1:8080/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{"model": "qwen2.5-1.5b-instruct-q4_k_m.gguf", "messages": [{"role": "user", "content": "Hi"}]}'
+
+Can't find worker PID to kill:
+  → List all: ps aux | grep llama-server
+  → Count: should be 2 processes
+  → Kill second one: kill -9 <PID>
+
+
+COMMANDS REFERENCE
+═════════════════════════════════════════════════════════════════════════════
+
+Server: Check health
+  curl http://localhost:8080/healthz
+
+Server: Check workers
+  curl http://localhost:8080/status | jq '.workers[] | {id, state}'
+
+Server: Monitor in real-time
+  watch -n 2 'curl -s http://127.0.0.1:8080/status | jq ".workers[] | {id, state, tok_per_sec}"'
+
+Client: Test connectivity
+  curl http://<SERVER_IP>:8080/healthz
+
+Client: Check status
+  curl http://<SERVER_IP>:8080/status | jq .
+
+
+SUCCESS CHECKLIST
+═════════════════════════════════════════════════════════════════════════════
+
+□ Server builds and starts
+□ Browser opens React UI at http://<SERVER_IP>:8080/
+□ Both workers show "healthy" (green)
+□ Test message works (response appears)
+□ Status monitor shows tok_per_sec > 20
+□ Stress test creates load
+□ Status shows sessions on both workers
+□ After kill: w2 becomes "unhealthy" (red)
+□ After kill: w1 sessions increase
+□ After kill: chat still works
+□ Logs show "session moved" messages
+□ Success rate >= 95%
+
+✅ ALL CHECKED? Phase 1 Fault Tolerance WORKS!
+
+
+USEFUL FILES
+═════════════════════════════════════════════════════════════════════════════
+
+SERVER_COMMANDS.md       ← Detailed commands (this file)
+SERVER_CLIENT_SETUP.md   ← Full setup guide with troubleshooting
+TESTING_GUIDE.md         ← Comprehensive testing walkthrough
+README_PHASE1.md         ← Executive summary
+
+
+NEXT STEPS AFTER SUCCESS
+═════════════════════════════════════════════════════════════════════════════
+
+1. Read:   README_PHASE1.md (understand Phase 1)
+2. Viva:   PHASE1_TECHNICAL_DETAILS.md (talking points)
+3. Phase2: docs/03-phase-2-intelligent-workload-allocation.md
+
+════════════════════════════════════════════════════════════════════════════════
+
+You're ready! Start with STEP 1 on the server machine 🚀
+
+════════════════════════════════════════════════════════════════════════════════

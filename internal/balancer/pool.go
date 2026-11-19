@@ -54,6 +54,7 @@ type Worker struct {
 	mu                  sync.RWMutex
 	lastCheck           time.Time
 	lastError           string
+	tokPerSec           atomic.Value // float64
 }
 
 // Load is the number of requests assigned to the worker. It includes requests
@@ -207,6 +208,31 @@ func (w *Worker) recordFailure(err error) {
 	w.lastError = err.Error()
 	w.mu.Unlock()
 	w.applyProbe(probeFailure, time.Now())
+}
+
+// UpdateSpeed uses EWMA to update the rolling token/s rate: new = 0.7*old + 0.3*measured.
+// Clamps negative/zero to a minimum of 1.0.
+func (w *Worker) UpdateSpeed(measured float64) {
+	if measured < 1.0 {
+		measured = 1.0
+	}
+	old := w.getTokPerSecInternal()
+	new := 0.7*old + 0.3*measured
+	w.tokPerSec.Store(new)
+}
+
+// getTokPerSecInternal returns the current rolling token/s, or 20.0 if not yet initialized.
+func (w *Worker) getTokPerSecInternal() float64 {
+	v := w.tokPerSec.Load()
+	if v == nil {
+		return 20.0
+	}
+	return v.(float64)
+}
+
+// GetTokPerSec returns the current rolling token/s rate.
+func (w *Worker) GetTokPerSec() float64 {
+	return w.getTokPerSecInternal()
 }
 func (w *Worker) markExited() bool {
 	was := w.state.Load()
@@ -554,6 +580,7 @@ func (p *Pool) Snapshot() []api.WorkerStatus {
 			InFlight:            w.InFlight.Load(),
 			Served:              w.Served.Load(),
 			EstTokensInFlight:   w.EstTokensInFlight.Load(),
+			TokPerSec:           w.GetTokPerSec(),
 			ConsecutiveFailures: int(w.consecutiveFailures.Load()),
 			LastCheck:           lastCheck,
 			LastError:           lastErr,

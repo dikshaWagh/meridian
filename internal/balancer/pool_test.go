@@ -144,3 +144,84 @@ func TestModels(t *testing.T) {
 		t.Fatalf("got %v want %v", got, want)
 	}
 }
+
+// TestAtomicReservation verifies that 10 concurrent PickForSessionWithPolicyReserved
+// calls on 1 idle worker all succeed and reserve atomically. pickMu + Reserved
+// prevents thundering herd where all goroutines see the same least-loaded worker.
+func TestAtomicReservation(t *testing.T) {
+	p := testPool()
+	w := p.Workers()[0]
+	w.setHealthy(true)
+
+	// 10 concurrent picks should each reserve one slot atomically.
+	const n = 10
+	done := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			worker, _, res, err := p.PickForSessionWithPolicyReserved("qwen-0.5b", "", "")
+			if err != nil {
+				done <- err
+				return
+			}
+			if res == nil {
+				done <- errors.New("nil reservation")
+				return
+			}
+			// All picks should select the same worker (only one model)
+			if worker.Spec.ID != "w1" {
+				done <- errors.New("unexpected worker")
+				return
+			}
+			res.Commit()
+			done <- nil
+		}()
+	}
+
+	for i := 0; i < n; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("concurrent pick %d: %v", i, err)
+		}
+	}
+
+	// All should be in-flight now
+	if w.InFlight.Load() != int64(n) {
+		t.Fatalf("expected %d in-flight, got %d", n, w.InFlight.Load())
+	}
+}
+
+// TestTokPerSecEWMA verifies the rolling token/s EWMA and clamping.
+func TestTokPerSecEWMA(t *testing.T) {
+	w := testPool().Workers()[0]
+
+	// Initial: 20.0
+	if want := 20.0; w.GetTokPerSec() != want {
+		t.Fatalf("initial tok_per_sec: got %v want %v", w.GetTokPerSec(), want)
+	}
+
+	// Update with 10.0: new = 0.7*20 + 0.3*10 = 14 + 3 = 17
+	w.UpdateSpeed(10.0)
+	if want := 17.0; w.GetTokPerSec() != want {
+		t.Fatalf("after first update: got %v want %v", w.GetTokPerSec(), want)
+	}
+
+	// Update with 30.0: new = 0.7*17 + 0.3*30 = 11.9 + 9 = 20.9
+	w.UpdateSpeed(30.0)
+	got := w.GetTokPerSec()
+	if got < 20.8 || got > 21.0 {
+		t.Fatalf("after second update: got %v (want ~20.9)", got)
+	}
+
+	// Clamp negative to 1.0: new = 0.7*20.9 + 0.3*1 ≈ 14.63 + 0.3 = 14.93
+	w.UpdateSpeed(-10.0)
+	got = w.GetTokPerSec()
+	if got < 14.8 || got > 15.0 {
+		t.Fatalf("after negative clamp: got %v (want ~14.93)", got)
+	}
+
+	// Clamp zero to 1.0: new = 0.7*14.93 + 0.3*1 ≈ 10.45 + 0.3 = 10.75
+	w.UpdateSpeed(0.0)
+	got = w.GetTokPerSec()
+	if got < 10.6 || got > 10.9 {
+		t.Fatalf("after zero clamp: got %v (want ~10.75)", got)
+	}
+}
