@@ -22,6 +22,8 @@ type requestUsage struct {
 	in, out      int
 	ok           bool
 	assistantMsg *api.Message
+	streamed     bool      // reply was streamed (server-sent events)
+	firstTok     time.Time // when the first streamed content arrived
 }
 type usageKey struct{}
 
@@ -197,6 +199,12 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 		r.ContentLength = int64(len(raw))
 	}
+	if req.Stream {
+		body, _ := io.ReadAll(r.Body)
+		body = withStreamUsage(body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+	}
 
 	w.Header().Set("X-Meridian-Worker", worker.Spec.ID)
 	w.Header().Set("X-Meridian-Model", req.Model)
@@ -279,7 +287,11 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	// Update rolling token/s from actual usage
 	if usage.ok && rec.status == 200 {
 		elapsed := time.Since(start).Seconds()
-		if elapsed > 0 {
+		if usage.streamed && !usage.firstTok.IsZero() {
+			// Generation speed: prompt processing happens before the first token.
+			elapsed = time.Since(usage.firstTok).Seconds()
+		}
+		if elapsed > 0.05 {
 			measured := float64(usage.out) / elapsed
 			worker.UpdateSpeed(measured)
 		}
@@ -317,6 +329,11 @@ func routeSize(pool *Pool, req api.ChatRequest, convID string) RouteRequest {
 }
 
 func captureUsage(resp *http.Response, usage *requestUsage) error {
+	if resp.StatusCode == 200 && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		usage.streamed = true
+		resp.Body = &streamUsageReader{src: resp.Body, usage: usage}
+		return nil
+	}
 	if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
 		return nil
 	}
