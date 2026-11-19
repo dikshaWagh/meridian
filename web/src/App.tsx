@@ -1,304 +1,190 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { errorMessage, setDefaultPolicy, streamChat } from './api'
-import type { ChatMessage } from './types'
-import { useConversations } from './hooks/useConversations'
-import { useSystem } from './hooks/useSystem'
-import { useTheme, useToasts } from './hooks/useTheme'
-import { Sidebar } from './components/Sidebar'
-import { ChatView } from './components/ChatView'
-import { MLStudio } from './components/MLStudio'
-import { ToastStack } from './components/ToastStack'
-import { StatusMonitor } from './components/StatusMonitor'
-import { Menu } from './components/Icons'
+import { useEffect, useRef, useState } from 'react'
+import { errorMessage, fetchCatalog, sendChat } from './api'
+import { ChatPanel } from './components/ChatPanel'
+import { ClusterPanel } from './components/ClusterPanel'
+import { OCRPanel } from './components/OCRPanel'
+import { uid, useConversations } from './hooks/useConversations'
+import { usePoll } from './hooks/usePoll'
+import type { ChatMessage, ChatTurn, Conversation } from './types'
 
-type View = 'chat' | 'documents'
+type Tab = 'chat' | 'ocr'
 
-function uid(): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
-  return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+interface Prefs {
+  model: string
+  policy: string
+  stream: boolean
+}
+
+const PREFS_KEY = 'meridian.ui.prefs.v1'
+
+function loadPrefs(): Prefs {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY)
+    if (raw) return { model: '', policy: '', stream: true, ...(JSON.parse(raw) as Partial<Prefs>) }
+  } catch {
+    // Corrupt preferences fall back to defaults.
+  }
+  return { model: '', policy: '', stream: true }
 }
 
 function titleFrom(text: string): string {
   const clean = text.replace(/\s+/g, ' ').trim()
-  if (clean.length <= 46) return clean
-  return `${clean.slice(0, 46).trimEnd()}…`
-}
-
-const POLICY_KEY = 'meridian.policy.v1'
-
-function storedPolicy(): string {
-  try {
-    return localStorage.getItem(POLICY_KEY) ?? ''
-  } catch {
-    return ''
-  }
+  return clean.length <= 46 ? clean : `${clean.slice(0, 46).trimEnd()}…`
 }
 
 export default function App() {
-  const { theme, toggle } = useTheme()
-  const { toasts, push, dismiss } = useToasts()
-  const { catalog, connected, error: systemError, refreshCatalog } = useSystem()
-  const conversations = useConversations()
-  const {
-    active,
-    conversations: allConversations,
-    activeId,
-    createConversation,
-    deleteConversation,
-    ensureModel,
-    patchActive,
-    setActiveId,
-    updateConversation,
-  } = conversations
-
-  const [policy, setPolicy] = useState(storedPolicy)
-  const [streaming, setStreaming] = useState(false)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [view, setView] = useState<View>('chat')
+  const catalog = usePoll(fetchCatalog, 5000)
+  const convs = useConversations()
+  const [tab, setTab] = useState<Tab>('chat')
+  const [prefs, setPrefs] = useState<Prefs>(loadPrefs)
+  const [busy, setBusy] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
-  const lastErrorRef = useRef('')
-
-  const activeModel = active?.model || catalog?.llm[0]?.id || ''
 
   useEffect(() => {
-    if (!policy && catalog?.default_routing_policy) {
-      setPolicy(catalog.default_routing_policy)
-    }
-  }, [policy, catalog?.default_routing_policy])
-
-  useEffect(() => {
-    if (!policy) return
     try {
-      localStorage.setItem(POLICY_KEY, policy)
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs))
     } catch {
-      // Ignore unavailable storage.
+      // Preferences are a convenience; ignore storage failures.
     }
-  }, [policy])
+  }, [prefs])
 
-  useEffect(() => {
-    if (catalog?.llm?.length) ensureModel(catalog.llm[0].id)
-  }, [catalog, ensureModel])
+  const models = catalog.data?.llm ?? []
+  // Prefer the saved model; if it is gone, pick a healthy one.
+  const model =
+    models.find((m) => m.id === prefs.model)?.id ??
+    models.find((m) => m.healthy)?.id ??
+    models[0]?.id ??
+    ''
+  const active: Conversation | null = convs.list.find((c) => c.id === convs.activeId) ?? null
 
-  useEffect(() => {
-    if (systemError && systemError !== lastErrorRef.current) {
-      lastErrorRef.current = systemError
-      push(systemError, 'error')
-    }
-  }, [systemError, push])
+  const send = async (text: string) => {
+    if (busy || !model) return
+    const convId = convs.activeId ?? convs.create()
+    const prior = active?.id === convId ? active.messages : []
+    const userMsg: ChatMessage = { id: uid(), role: 'user', content: text }
+    const replyId = uid()
 
-  useEffect(() => {
-    return () => abortRef.current?.abort()
-  }, [])
+    convs.update(convId, (c) => ({
+      ...c,
+      title: c.messages.length === 0 ? titleFrom(text) : c.title,
+      messages: [...c.messages, userMsg, { id: replyId, role: 'assistant', content: '', pending: true }],
+    }))
 
-  const handleNewConversation = useCallback(() => {
-    createConversation(activeModel)
-    setView('chat')
-    setSidebarOpen(false)
-  }, [activeModel, createConversation])
+    // Send the whole visible history each turn. Failed or pending turns are
+    // left out so the model never sees an error message as conversation.
+    const history: ChatTurn[] = [...prior, userMsg]
+      .filter((m) => !m.pending && !m.error && m.content)
+      .map((m) => ({ role: m.role, content: m.content }))
 
-  const handleSelectConversation = useCallback(
-    (id: string) => {
-      setActiveId(id)
-      setView('chat')
-      setSidebarOpen(false)
-    },
-    [setActiveId],
-  )
-
-  const sendMessage = useCallback(
-    async (text: string) => {
-      const conversation = active
-      if (!conversation || streaming) return
-      const model = conversation.model || catalog?.llm[0]?.id
-      if (!model) {
-        push('No LLM model is available.', 'error')
-        return
-      }
-
-      const history = conversation.messages
-        .filter((message) => !message.error && message.content.trim())
-        .map((message) => ({ role: message.role, content: message.content }))
-
-      const userMessage: ChatMessage = {
-        id: uid(),
-        role: 'user',
-        content: text,
-        createdAt: Date.now(),
-      }
-      const assistantId = uid()
-      const assistantMessage: ChatMessage = {
-        id: assistantId,
-        role: 'assistant',
-        content: '',
-        createdAt: Date.now(),
-        model,
-        pending: true,
-      }
-
-      updateConversation(conversation.id, (current) => ({
-        ...current,
-        title: current.messages.length === 0 ? titleFrom(text) : current.title,
-        model,
-        messages: [...current.messages, userMessage, assistantMessage],
-        updatedAt: Date.now(),
+    const patchReply = (fn: (m: ChatMessage) => ChatMessage) =>
+      convs.update(convId, (c) => ({
+        ...c,
+        messages: c.messages.map((m) => (m.id === replyId ? fn(m) : m)),
       }))
 
-      const controller = new AbortController()
-      abortRef.current = controller
-      setStreaming(true)
-      try {
-        await streamChat({
-          model,
-          messages: [...history, { role: 'user', content: text }],
-          policy: policy || undefined,
-          signal: controller.signal,
-          onDelta: (delta) => {
-            updateConversation(conversation.id, (current) => ({
-              ...current,
-              messages: current.messages.map((message) =>
-                message.id === assistantId
-                  ? { ...message, content: message.content + delta }
-                  : message,
-              ),
-            }))
-          },
-        })
-        updateConversation(conversation.id, (current) => ({
-          ...current,
-          messages: current.messages.map((message) =>
-            message.id === assistantId ? { ...message, pending: false } : message,
-          ),
-          updatedAt: Date.now(),
-        }))
-      } catch (err) {
-        if ((err as Error).name === 'AbortError') {
-          updateConversation(conversation.id, (current) => ({
-            ...current,
-            messages: current.messages.map((message) =>
-              message.id === assistantId ? { ...message, pending: false } : message,
-            ),
-          }))
-          push('Generation stopped.', 'info')
-        } else {
-          const message = errorMessage(err)
-          updateConversation(conversation.id, (current) => ({
-            ...current,
-            messages: current.messages.map((item) =>
-              item.id === assistantId ? { ...item, pending: false, error: message } : item,
-            ),
-            updatedAt: Date.now(),
-          }))
-          push(message, 'error')
-        }
-      } finally {
-        setStreaming(false)
-        abortRef.current = null
-      }
-    },
-    [active, streaming, catalog, policy, updateConversation, push],
-  )
-
-  const changePolicy = useCallback(
-    async (name: string) => {
-      if (name === policy) return
-      const previous = policy
-      setPolicy(name)
-      try {
-        await setDefaultPolicy(name)
-        void refreshCatalog()
-        push(`Routing policy set to ${name}.`, 'success')
-      } catch (err) {
-        setPolicy(previous)
-        push(errorMessage(err), 'error')
-      }
-    },
-    [policy, refreshCatalog, push],
-  )
-
-  const changeModel = useCallback(
-    (id: string) => {
-      patchActive((current) => ({ ...current, model: id }))
-    },
-    [patchActive],
-  )
+    const controller = new AbortController()
+    abortRef.current = controller
+    setBusy(true)
+    try {
+      const res = await sendChat({
+        model,
+        messages: history,
+        stream: prefs.stream,
+        policy: prefs.policy || undefined,
+        signal: controller.signal,
+        onDelta: (delta) => patchReply((m) => ({ ...m, content: m.content + delta })),
+      })
+      patchReply((m) => ({ ...m, pending: false, worker: res.worker, failover: res.failover }))
+    } catch (err) {
+      if (controller.signal.aborted) patchReply((m) => ({ ...m, pending: false, stopped: true }))
+      else patchReply((m) => ({ ...m, pending: false, error: errorMessage(err) }))
+    } finally {
+      abortRef.current = null
+      setBusy(false)
+    }
+  }
 
   return (
     <div className="app">
-      <Sidebar
-        conversations={allConversations}
-        activeId={activeId}
-        connected={connected}
-        theme={theme}
-        open={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-        onSelect={handleSelectConversation}
-        onNew={handleNewConversation}
-        onDelete={deleteConversation}
-        onToggleTheme={toggle}
-      />
-
-      <main className="main-panel">
-        <header className="topbar">
-          <button className="icon-button menu-button" onClick={() => setSidebarOpen(true)} aria-label="Open sidebar">
-            <Menu size={20} />
-          </button>
-          <div className="topbar-title">
-            <span className="crumb">{view === 'documents' ? 'Documents' : 'Chat'}</span>
-            <span className="crumb-sep">/</span>
-            <span className="crumb-current">
-              {view === 'documents' ? 'Document Analyzer' : (active?.title ?? 'New conversation')}
-            </span>
-          </div>
-          <div className="topbar-actions">
-            <div className="view-tabs" role="tablist" aria-label="Workspace">
-              <button
-                role="tab"
-                aria-selected={view === 'chat'}
-                className={`view-tab ${view === 'chat' ? 'active' : ''}`}
-                onClick={() => setView('chat')}
-              >
-                Chat
-              </button>
-              <button
-                role="tab"
-                aria-selected={view === 'documents'}
-                className={`view-tab ${view === 'documents' ? 'active' : ''}`}
-                onClick={() => setView('documents')}
-              >
-                Documents
-              </button>
-            </div>
-          </div>
-        </header>
-
-        <div className="main-content">
-          <div className="content-wrapper">
-            <div className="content-main">
-              {view === 'documents' ? (
-                <MLStudio catalog={catalog} onToast={push} />
-              ) : (
-                <ChatView
-                  conversation={active}
-                  models={catalog?.llm ?? []}
-                  policies={catalog?.routing_policies ?? []}
-                  policy={policy}
-                  streaming={streaming}
-                  active
-                  onSend={(text) => void sendMessage(text)}
-                  onStop={() => abortRef.current?.abort()}
-                  onSelectModel={changeModel}
-                  onSelectPolicy={(name) => void changePolicy(name)}
-                />
-              )}
-            </div>
-            <aside className="status-sidebar">
-              <StatusMonitor />
-            </aside>
-          </div>
+      <header className="topbar">
+        <div className="brand">
+          <BrandMark />
+          <span>Meridian</span>
         </div>
-      </main>
+        <nav className="tabs">
+          <button className={tab === 'chat' ? 'tab active' : 'tab'} onClick={() => setTab('chat')}>
+            Chat
+          </button>
+          <button className={tab === 'ocr' ? 'tab active' : 'tab'} onClick={() => setTab('ocr')}>
+            Document OCR
+          </button>
+        </nav>
+        <div className="topbar-right">
+          {catalog.error ? (
+            <span className="badge badge-warn" title={catalog.error}>gateway unreachable</span>
+          ) : (
+            <span className="badge badge-healthy">connected</span>
+          )}
+        </div>
+      </header>
 
-      <ToastStack toasts={toasts} onDismiss={dismiss} />
+      <div className={tab === 'chat' ? 'layout' : 'layout layout-no-sidebar'}>
+        {tab === 'chat' && (
+          <aside className="sidebar">
+            <button className="btn btn-primary full" onClick={() => convs.create()}>
+              New chat
+            </button>
+            <ul className="conv-list">
+              {convs.list.map((c) => (
+                <li key={c.id} className={c.id === convs.activeId ? 'conv active' : 'conv'}>
+                  <button className="conv-open" onClick={() => convs.setActiveId(c.id)}>
+                    <span className="conv-title">{c.title}</span>
+                    <span className="muted small">{new Date(c.updatedAt).toLocaleString()}</span>
+                  </button>
+                  <button className="conv-delete" title="Delete chat" onClick={() => convs.remove(c.id)}>
+                    ×
+                  </button>
+                </li>
+              ))}
+              {convs.list.length === 0 && <li className="muted small pad">No chats yet.</li>}
+            </ul>
+          </aside>
+        )}
+
+        <main className="main">
+          {tab === 'chat' ? (
+            <ChatPanel
+              conversation={active}
+              models={models}
+              policies={catalog.data?.routing_policies ?? []}
+              defaultPolicy={catalog.data?.default_routing_policy ?? ''}
+              model={model}
+              policy={prefs.policy}
+              stream={prefs.stream}
+              busy={busy}
+              onModel={(id) => setPrefs((p) => ({ ...p, model: id }))}
+              onPolicy={(name) => setPrefs((p) => ({ ...p, policy: name }))}
+              onStream={(on) => setPrefs((p) => ({ ...p, stream: on }))}
+              onSend={(text) => void send(text)}
+              onStop={() => abortRef.current?.abort()}
+            />
+          ) : (
+            <OCRPanel />
+          )}
+        </main>
+
+        <ClusterPanel models={models} />
+      </div>
     </div>
+  )
+}
+
+function BrandMark() {
+  return (
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <circle cx="12" cy="12" r="10.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M12 3 L13.6 12 L12 21 L10.4 12 Z" fill="currentColor" />
+      <path d="M3 12 L12 10.4 L21 12 L12 13.6 Z" fill="currentColor" opacity="0.45" />
+    </svg>
   )
 }

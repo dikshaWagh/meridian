@@ -1,115 +1,57 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Conversation } from '../types'
 
-const STORAGE_KEY = 'meridian.conversations.v2'
-const ACTIVE_KEY = 'meridian.activeConversation.v2'
+const STORAGE_KEY = 'meridian.conversations.v1'
 
 function uid(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
   return `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
 }
 
-function newConversation(model = ''): Conversation {
-  return {
-    id: uid(),
-    title: 'New conversation',
-    model,
-    messages: [],
-    updatedAt: Date.now(),
-  }
-}
-
 function load(): Conversation[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return [newConversation()]
+    if (!raw) return []
     const parsed = JSON.parse(raw) as Conversation[]
-    if (!Array.isArray(parsed) || parsed.length === 0) return [newConversation()]
-    return parsed.filter((c) => c && typeof c.id === 'string' && Array.isArray(c.messages))
+    // A reload cannot resume a stream, so nothing can still be pending.
+    return parsed.map((c) => ({
+      ...c,
+      messages: c.messages.map((m) => ({ ...m, pending: false })),
+    }))
   } catch {
-    return [newConversation()]
+    return []
   }
 }
 
 export function useConversations() {
-  const [conversations, setConversations] = useState<Conversation[]>(load)
-  const [activeId, setActiveId] = useState<string>(() => {
-    try {
-      const stored = localStorage.getItem(ACTIVE_KEY)
-      if (stored) return stored
-    } catch {
-      // Fall through to the first conversation.
-    }
-    return load()[0]?.id ?? ''
-  })
+  const [list, setList] = useState<Conversation[]>(load)
+  const [activeId, setActiveId] = useState<string | null>(null)
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations))
-        localStorage.setItem(ACTIVE_KEY, activeId)
-      } catch {
-        // Storage can be unavailable in private windows; chat still works.
-      }
-    }, 200)
-    return () => window.clearTimeout(timer)
-  }, [conversations, activeId])
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(list))
+    } catch {
+      // Storage full or disabled: the chat still works for this session.
+    }
+  }, [list])
 
-  const active = conversations.find((c) => c.id === activeId) ?? conversations[0]
-
-  const updateConversation = useCallback((id: string, update: (c: Conversation) => Conversation) => {
-    setConversations((current) => current.map((c) => (c.id === id ? update(c) : c)))
+  const create = useCallback((): string => {
+    const conv: Conversation = { id: uid(), title: 'New chat', updatedAt: Date.now(), messages: [] }
+    setList((prev) => [conv, ...prev])
+    setActiveId(conv.id)
+    return conv.id
   }, [])
 
-  const patchActive = useCallback(
-    (update: (c: Conversation) => Conversation) => {
-      if (!active) return
-      updateConversation(active.id, update)
-    },
-    [active, updateConversation],
-  )
-
-  const createConversation = useCallback((model: string) => {
-    const conversation = newConversation(model)
-    setConversations((current) => [conversation, ...current])
-    setActiveId(conversation.id)
-    return conversation.id
+  const update = useCallback((id: string, fn: (c: Conversation) => Conversation) => {
+    setList((prev) => prev.map((c) => (c.id === id ? { ...fn(c), updatedAt: Date.now() } : c)))
   }, [])
 
-  const deleteConversation = useCallback(
-    (id: string) => {
-      const next = conversations.filter((c) => c.id !== id)
-      const ensured = next.length > 0 ? next : [newConversation()]
-      setConversations(ensured)
-      if (active?.id === id) setActiveId(ensured[0].id)
-    },
-    [conversations, active?.id],
-  )
-
-  const ensureModel = useCallback((model: string) => {
-    if (!model) return
-    setConversations((current) => {
-      let changed = false
-      const next = current.map((c) => {
-        if (c.model) return c
-        changed = true
-        return { ...c, model }
-      })
-      return changed ? next : current
-    })
+  const remove = useCallback((id: string) => {
+    setList((prev) => prev.filter((c) => c.id !== id))
+    setActiveId((cur) => (cur === id ? null : cur))
   }, [])
 
-  return {
-    conversations,
-    active,
-    activeId: active?.id ?? '',
-    setActiveId,
-    updateConversation,
-    patchActive,
-    createConversation,
-    deleteConversation,
-    ensureModel,
-  }
+  return { list, activeId, setActiveId, create, update, remove }
 }
 
-export type ConversationsApi = ReturnType<typeof useConversations>
+export { uid }

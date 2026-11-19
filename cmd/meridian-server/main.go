@@ -5,10 +5,47 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"strconv"
+	"strings"
 
 	"github.com/dikshaWagh/meridian/internal/balancer"
 	"github.com/dikshaWagh/meridian/internal/ml"
 )
+
+// llmFlagSlice implements flag.Value to parse repeatable --llm flags.
+// Format: "model.gguf:2" or "model.gguf" (defaults to 1 worker).
+type llmFlagSlice []string
+
+func (f *llmFlagSlice) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *llmFlagSlice) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+// toConfigs parses "model.gguf[:workers]" values. The count follows the last
+// colon; a missing count means one instance, and a malformed count is an error.
+func (f llmFlagSlice) toConfigs() ([]balancer.LLMConfig, error) {
+	var configs []balancer.LLMConfig
+	for _, raw := range f {
+		value := strings.TrimSpace(raw)
+		model, workers := value, 1
+		if i := strings.LastIndex(value, ":"); i >= 0 {
+			n, err := strconv.Atoi(strings.TrimSpace(value[i+1:]))
+			if err != nil || n < 1 {
+				return nil, fmt.Errorf("--llm %q: worker count must be a positive integer", raw)
+			}
+			model, workers = strings.TrimSpace(value[:i]), n
+		}
+		if model == "" {
+			return nil, fmt.Errorf("--llm %q: missing model file", raw)
+		}
+		configs = append(configs, balancer.LLMConfig{Model: model, Workers: workers})
+	}
+	return configs, nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -36,11 +73,28 @@ func main() {
 		fs.StringVar(&o.RoutingPolicy, "routing-policy", "round-robin", "default routing policy (see /policies)")
 		fs.BoolVar(&o.EnableLLM, "enable-llm", true, "enable the LLM serving subsystem")
 		fs.BoolVar(&o.EnableML, "enable-ml", false, "enable the OCR serving subsystem")
-		fs.StringVar(&o.LLMModel, "llm-model", "", "serve one GGUF model file instead of the built-in worker set (relative paths use --models-dir)")
-		fs.StringVar(&o.LLMModelName, "llm-model-name", "", "public model id for --llm-model (defaults to the file name)")
-		fs.IntVar(&o.LLMWorkers, "llm-workers", 1, "number of workers for --llm-model")
+		fs.StringVar(&o.LLMModel, "llm-model", "", "[DEPRECATED] serve one GGUF model file instead of the built-in worker set (use --llm instead)")
+		fs.StringVar(&o.LLMModelName, "llm-model-name", "", "[DEPRECATED] public model id for --llm-model (use --llm instead)")
+		fs.IntVar(&o.LLMWorkers, "llm-workers", 1, "[DEPRECATED] number of workers for --llm-model (use --llm instead)")
 		fs.StringVar(&o.MLConfig, "ml-config", "configs/ml.yaml", "path to the ML YAML configuration")
+		fs.IntVar(&o.RAMHeadroomMB, "ram-headroom-mb", 1024, "RAM kept free after admitting all LLM instances")
+
+		var llmFlags llmFlagSlice
+		fs.Var(&llmFlags, "llm", "model file with optional instance count, e.g. qwen.gguf:2 (repeat for each model; count defaults to 1)")
+
 		fs.Parse(os.Args[2:])
+
+		if o.LLMModel != "" && len(llmFlags) > 0 {
+			fmt.Fprintln(os.Stderr, "error: use either --llm or the deprecated --llm-model, not both")
+			os.Exit(2)
+		}
+		configs, err := llmFlags.toConfigs()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(2)
+		}
+		o.LLMConfigs = configs
+
 		if err := balancer.Run(o); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)

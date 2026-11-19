@@ -1,4 +1,5 @@
-export type Role = 'user' | 'assistant' | 'system'
+// Shapes returned by the Meridian gateway. Keep these in sync with
+// internal/api/types.go (LLM) and internal/ml/types.go (OCR).
 
 export interface CatalogModel {
   id: string
@@ -24,38 +25,6 @@ export interface Catalog {
   default_routing_policy: string
 }
 
-export interface ChatMessage {
-  id: string
-  role: Role
-  content: string
-  createdAt: number
-  model?: string
-  pending?: boolean
-  error?: string
-}
-
-export interface Conversation {
-  id: string
-  title: string
-  model: string
-  messages: ChatMessage[]
-  updatedAt: number
-}
-
-export interface OCRLine {
-  text: string
-  confidence?: number
-  bbox?: { x: number; y: number; width: number; height: number }
-}
-
-export interface OCRResult {
-  request_id: string
-  model: string
-  text: string
-  lines: OCRLine[]
-  processing_ms: number
-}
-
 export interface WorkerStatus {
   id: string
   model: string
@@ -76,4 +45,86 @@ export interface WorkerStatus {
 export interface SystemStatus {
   workers: WorkerStatus[]
   sessionCount: number
+}
+
+export interface OCRLine {
+  text: string
+  confidence?: number
+  bbox?: { x: number; y: number; width: number; height: number }
+}
+
+export interface OCRResponse {
+  request_id: string
+  model: string
+  text: string
+  lines: OCRLine[]
+  processing_ms: number
+}
+
+export interface MLModel {
+  id: string
+  object: string
+  kind: string
+  state: string
+  healthy: boolean
+  worker_id?: string
+}
+
+export interface MLWorker {
+  id: string
+  kind: string
+  model_id: string
+  engine: string
+  device: string
+  pid: number
+  port: number
+  state: string
+  healthy: boolean
+  in_flight: number
+  concurrency: number
+  served: number
+  failed: number
+  restarts: number
+  last_error?: string
+  last_inference_ms: number
+}
+
+export interface MLResources {
+  policy: string
+  ram_known: boolean
+  ram_available_mb: number
+  ram_total_mb: number
+  ram_reserved_mb: number
+  ram_headroom_mb: number
+  probe_error?: string
+}
+
+export interface MLStatus {
+  enabled: boolean
+  models: MLModel[]
+  workers: MLWorker[]
+  resources: MLResources
+}
+
+export type Role = 'user' | 'assistant'
+
+export interface ChatTurn {
+  role: Role
+  content: string
+}
+
+export interface ChatMessage extends ChatTurn {
+  id: string
+  pending?: boolean
+  stopped?: boolean
+  error?: string
+  worker?: string | null
+  failover?: string | null
+}
+
+export interface Conversation {
+  id: string
+  title: string
+  updatedAt: number
+  messages: ChatMessage[]
 }
