@@ -65,7 +65,8 @@ func Run(o Options) error {
 	mlGrace := 10 * time.Second
 	if o.EnableLLM {
 		o.ModelsDir, _ = expandHome(o.ModelsDir)
-		log.Printf("models dir: %s", o.ModelsDir)
+		exe, _ := os.Executable()
+		log.Printf("models dir: %s (binary: %s)", o.ModelsDir, exe)
 		if err := preflight(o); err != nil {
 			return err
 		}

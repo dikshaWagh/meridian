@@ -5,8 +5,37 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-MODEL="${MODEL:-qwen2.5-1.5b-instruct-q4_k_m.gguf}"
-MODELS_DIR="${MODELS_DIR:-$HOME/models}"
+# Models live either in ~/models or in the repo's own models/ directory.
+if [[ -z "${MODELS_DIR:-}" ]]; then
+	if [[ -d "$HOME/models" ]]; then
+		MODELS_DIR="$HOME/models"
+	elif [[ -d "$PWD/models" ]]; then
+		MODELS_DIR="$PWD/models"
+	else
+		MODELS_DIR="$HOME/models"
+	fi
+fi
+
+# Default to qwen2.5 1.5B when present, otherwise the first GGUF in the dir.
+if [[ -z "${MODEL:-}" ]]; then
+	if [[ -f "$MODELS_DIR/qwen2.5-1.5b-instruct-q4_k_m.gguf" ]]; then
+		MODEL="qwen2.5-1.5b-instruct-q4_k_m.gguf"
+	else
+		shopt -s nullglob
+		ggufs=("$MODELS_DIR"/*.gguf)
+		shopt -u nullglob
+		if (( ${#ggufs[@]} )); then
+			MODEL="${ggufs[0]##*/}"
+		fi
+	fi
+fi
+
+if [[ -z "$MODEL" ]]; then
+	echo "error: no .gguf files found in $MODELS_DIR" >&2
+	echo "       start Ollama once, or set MODELS_DIR=/path/to/models" >&2
+	exit 1
+fi
+
 LLAMA_BIN="${LLAMA_BIN:-/usr/local/lib/ollama/llama-server}"
 LLM_WORKERS="${LLM_WORKERS:-2}"
 THREADS="${THREADS:-8}"

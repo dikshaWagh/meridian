@@ -55,3 +55,25 @@ export interface OCRResult {
   lines: OCRLine[]
   processing_ms: number
 }
+
+export interface WorkerStatus {
+  id: string
+  model: string
+  port: number
+  pid: number
+  state: string
+  healthy: boolean
+  in_flight: number
+  served: number
+  est_tokens_in_flight: number
+  tok_per_sec: number
+  consecutive_failures: number
+  last_check: string
+  last_error: string
+  sessions: number
+}
+
+export interface SystemStatus {
+  workers: WorkerStatus[]
+  sessionCount: number
+}

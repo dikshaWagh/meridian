@@ -8,6 +8,7 @@ import { Sidebar } from './components/Sidebar'
 import { ChatView } from './components/ChatView'
 import { MLStudio } from './components/MLStudio'
 import { ToastStack } from './components/ToastStack'
+import { StatusMonitor } from './components/StatusMonitor'
 import { Menu } from './components/Icons'
 
 type View = 'chat' | 'documents'
@@ -271,22 +272,29 @@ export default function App() {
         </header>
 
         <div className="main-content">
-          {view === 'documents' ? (
-            <MLStudio catalog={catalog} onToast={push} />
-          ) : (
-            <ChatView
-              conversation={active}
-              models={catalog?.llm ?? []}
-              policies={catalog?.routing_policies ?? []}
-              policy={policy}
-              streaming={streaming}
-              active
-              onSend={(text) => void sendMessage(text)}
-              onStop={() => abortRef.current?.abort()}
-              onSelectModel={changeModel}
-              onSelectPolicy={(name) => void changePolicy(name)}
-            />
-          )}
+          <div className="content-wrapper">
+            <div className="content-main">
+              {view === 'documents' ? (
+                <MLStudio catalog={catalog} onToast={push} />
+              ) : (
+                <ChatView
+                  conversation={active}
+                  models={catalog?.llm ?? []}
+                  policies={catalog?.routing_policies ?? []}
+                  policy={policy}
+                  streaming={streaming}
+                  active
+                  onSend={(text) => void sendMessage(text)}
+                  onStop={() => abortRef.current?.abort()}
+                  onSelectModel={changeModel}
+                  onSelectPolicy={(name) => void changePolicy(name)}
+                />
+              )}
+            </div>
+            <aside className="status-sidebar">
+              <StatusMonitor />
+            </aside>
+          </div>
         </div>
       </main>
 

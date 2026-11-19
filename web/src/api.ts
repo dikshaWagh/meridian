@@ -1,4 +1,4 @@
-import type { Catalog, OCRResult } from './types'
+import type { Catalog, OCRResult, SystemStatus } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -39,6 +39,10 @@ async function asJson<T>(res: Response): Promise<T> {
 
 export function fetchCatalog(): Promise<Catalog> {
   return fetch('/v1/catalog', { cache: 'no-store' }).then((r) => asJson<Catalog>(r))
+}
+
+export function fetchStatus(): Promise<SystemStatus> {
+  return fetch('/status', { cache: 'no-store' }).then((r) => asJson<SystemStatus>(r))
 }
 
 export function setDefaultPolicy(name: string): Promise<unknown> {

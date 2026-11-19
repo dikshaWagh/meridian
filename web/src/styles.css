@@ -492,6 +492,30 @@ button {
   flex: 1;
   min-height: 0;
   display: flex;
+  padding: 16px;
+  gap: 16px;
+  overflow: hidden;
+}
+
+.content-wrapper {
+  display: flex;
+  gap: 16px;
+  width: 100%;
+  min-height: 0;
+}
+
+.content-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.status-sidebar {
+  width: 320px;
+  min-width: 320px;
+  overflow-y: auto;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
 }
 
 /* ---------- Generic buttons ---------- */
