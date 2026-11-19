@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,7 @@ type turnSample struct {
 	StatusCode             int    `json:"status_code"`
 	LatencyMS              int64  `json:"latency_ms"`
 	WorkerID               string `json:"worker_id"`
+	RoutingPolicy          string `json:"routing_policy"`
 	ActualPromptTokens     int    `json:"actual_prompt_tokens"`
 	ActualCompletionTokens int    `json:"actual_completion_tokens"`
 }
@@ -67,6 +69,8 @@ type latencySummary struct {
 }
 
 type summary struct {
+	Policy                string                 `json:"policy"` // requested policy; "" = server default
+	PoliciesObserved      map[string]int         `json:"policies_observed"`
 	ModelsCount           int                    `json:"models_count"`
 	ConversationsPerModel int                    `json:"conversations_per_model"`
 	ConversationsTotal    int                    `json:"conversations_total"`
@@ -79,6 +83,7 @@ type summary struct {
 	FailuresByStatus      map[int]int            `json:"failures_by_status"`
 	LatencySuccessful     latencySummary         `json:"latency_successful_ms"`
 	LatencyByTurnIndex    map[int]latencySummary `json:"latency_by_turn_index_ms"`
+	RequestsByWorker      map[string]int         `json:"requests_by_worker"`
 	RequestsPerSecond     float64                `json:"requests_per_second"`
 	TokensPerSecond       float64                `json:"tokens_per_second"`
 	RunDurationSeconds    float64                `json:"run_duration_seconds"`
@@ -86,37 +91,88 @@ type summary struct {
 
 func main() {
 	addr := flag.String("addr", "http://localhost:8080", "Meridian server address")
-	concurrency := flag.Int("concurrency", 6, "conversations running in parallel")
+	concurrency := flag.Int("concurrency", 6, "conversations running in parallel (used when --concurrencies is empty)")
+	concurrencies := flag.String("concurrencies", "", "comma-separated concurrency levels to sweep, e.g. 2,4,8,12")
+	policies := flag.String("policies", "", "comma-separated routing policies to compare, e.g. round-robin,token-aware (empty = server default)")
 	convPerModel := flag.Int("conversations-per-model", 200, "unique conversations to run per model")
+	cooldown := flag.Duration("cooldown", 5*time.Second, "pause between runs in a sweep")
 	flag.Parse()
 
-	if *concurrency <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --concurrency must be > 0")
-		os.Exit(2)
-	}
 	if *convPerModel <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --conversations-per-model must be > 0")
 		os.Exit(2)
 	}
+	levels := []int{*concurrency}
+	if *concurrencies != "" {
+		parsed, err := parseInts(*concurrencies)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: --concurrencies:", err)
+			os.Exit(2)
+		}
+		levels = parsed
+	}
+	for _, c := range levels {
+		if c <= 0 {
+			fmt.Fprintln(os.Stderr, "error: concurrency must be > 0")
+			os.Exit(2)
+		}
+	}
+	policyList := parseList(*policies)
+	if len(policyList) == 0 {
+		policyList = []string{""}
+	}
 
 	base := strings.TrimRight(*addr, "/")
 	models := fetchModels(base)
+	fmt.Printf("models: %s\n", strings.Join(models, ", "))
 
-	convs := buildConversations(models, *convPerModel)
+	var runs []summary
+	for _, p := range policyList {
+		for _, c := range levels {
+			if len(runs) > 0 {
+				time.Sleep(*cooldown)
+			}
+			n := len(runs) + 1
+			fmt.Printf("\n=== run %d: policy=%s concurrency=%d ===\n", n, policyLabel(p), c)
+			tag := fmt.Sprintf("r%d-%d", time.Now().Unix(), n)
+			s := runOnce(base, models, p, c, *convPerModel, tag)
+			printSummary(s)
+			runs = append(runs, s)
+		}
+	}
+
+	if len(runs) == 1 {
+		if err := writeJSON("stress-results.json", runs[0]); err != nil {
+			fmt.Fprintln(os.Stderr, "error writing stress-results.json:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	printMatrix(runs)
+	if err := writeJSON("stress-results-matrix.json", runs); err != nil {
+		fmt.Fprintln(os.Stderr, "error writing stress-results-matrix.json:", err)
+		os.Exit(1)
+	}
+	fmt.Println("\nwrote stress-results-matrix.json")
+}
+
+// runOnce runs every conversation once at the given concurrency. The tag makes
+// conversation IDs unique per run, so sessions from an earlier run are not reused.
+func runOnce(base string, models []string, policy string, concurrency, perModel int, tag string) summary {
+	convs := buildConversations(models, perModel, tag)
 	total := len(convs)
-	fmt.Printf("running %d conversations (%d models x %d/model) at concurrency %d\n", total, len(models), *convPerModel, *concurrency)
+	fmt.Printf("running %d conversations (%d models x %d/model) at concurrency %d\n", total, len(models), perModel, concurrency)
 
 	// This creates a buffered channel named jobs that can hold total items of type
-	// ye sirf aek thread safe FIFO Data structure hai.
+	// conversation. It is a thread-safe FIFO queue.
 	jobs := make(chan conversation, total)
-
 	for _, c := range convs {
 		jobs <- c
 	}
 	close(jobs)
 
 	client := &http.Client{Timeout: 300 * time.Second}
-	results := make(chan turnSample, *concurrency*4)
+	results := make(chan turnSample, concurrency*4)
 	var collected []turnSample
 	var collectWG sync.WaitGroup
 	collectWG.Add(1)
@@ -130,12 +186,12 @@ func main() {
 	var done atomic.Int64
 	start := time.Now()
 	var workers sync.WaitGroup
-	for i := 0; i < *concurrency; i++ {
+	for i := 0; i < concurrency; i++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for c := range jobs {
-				runConversation(client, base, c, results)
+				runConversation(client, base, c, policy, results)
 				if n := done.Add(1); n%25 == 0 {
 					fmt.Printf("progress: %d/%d conversations completed\n", n, total)
 				}
@@ -148,12 +204,9 @@ func main() {
 	close(results)
 	collectWG.Wait()
 
-	s := summarize(collected, runDuration, len(models), *convPerModel, total, *concurrency)
-	printSummary(s)
-	if err := writeSummary(s); err != nil {
-		fmt.Fprintln(os.Stderr, "error writing stress-results.json:", err)
-		os.Exit(1)
-	}
+	s := summarize(collected, runDuration, len(models), perModel, total, concurrency)
+	s.Policy = policy
+	return s
 }
 
 func fetchModels(addr string) []string {
@@ -184,14 +237,14 @@ func fetchModels(addr string) []string {
 }
 
 // buildConversations creates one entry per (model, index) pair; conversation i
-// for a given model reuses scripts[i % len(scripts)].
-func buildConversations(models []string, perModel int) []conversation {
+// for a given model reuses scripts[i % len(scripts)]. tag prefixes every ID.
+func buildConversations(models []string, perModel int, tag string) []conversation {
 	convs := make([]conversation, 0, len(models)*perModel)
 	for i := 0; i < perModel; i++ { // outer loop: conversation index
 		for _, m := range models { // inner loop: model
 			convs = append(convs, conversation{
 				Model:  m,
-				ConvID: fmt.Sprintf("%s-c%d", m, i),
+				ConvID: fmt.Sprintf("%s-%s-c%d", tag, m, i),
 				Script: scripts[i%len(scripts)],
 			})
 		}
@@ -201,13 +254,13 @@ func buildConversations(models []string, perModel int) []conversation {
 
 // runConversation sends each turn sequentially, waiting for the response
 // before sending the next (Meridian returns 409 on concurrent same-ID use).
-func runConversation(client *http.Client, addr string, c conversation, results chan<- turnSample) {
+func runConversation(client *http.Client, addr string, c conversation, policy string, results chan<- turnSample) {
 	for idx, turn := range c.Script {
-		results <- sendTurn(client, addr, c.Model, c.ConvID, idx+1, turn)
+		results <- sendTurn(client, addr, c.Model, c.ConvID, idx+1, turn, policy)
 	}
 }
 
-func sendTurn(client *http.Client, addr, model, convID string, turnIndex int, turn string) turnSample {
+func sendTurn(client *http.Client, addr, model, convID string, turnIndex int, turn, policy string) turnSample {
 	out := turnSample{ConversationID: convID, Model: model, TurnIndex: turnIndex}
 
 	body, _ := json.Marshal(api.ChatRequest{
@@ -222,6 +275,9 @@ func sendTurn(client *http.Client, addr, model, convID string, turnIndex int, tu
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Conversation-ID", convID)
+	if policy != "" {
+		req.Header.Set("X-Meridian-Routing-Policy", policy)
+	}
 
 	resp, err := client.Do(req)
 	out.LatencyMS = time.Since(start).Milliseconds()
@@ -232,6 +288,7 @@ func sendTurn(client *http.Client, addr, model, convID string, turnIndex int, tu
 
 	out.StatusCode = resp.StatusCode
 	out.WorkerID = resp.Header.Get("X-Meridian-Worker")
+	out.RoutingPolicy = resp.Header.Get("X-Meridian-Routing-Policy")
 	if resp.StatusCode == http.StatusOK {
 		var chat api.ChatResponse
 		if err := json.NewDecoder(resp.Body).Decode(&chat); err == nil {
@@ -252,8 +309,16 @@ func summarize(samples []turnSample, runDuration time.Duration, modelsCount, per
 	byStatus := map[int]int{}
 	allLatencies := []int64{}
 	byTurn := map[int][]int64{}
+	observed := map[string]int{}
+	byWorker := map[string]int{}
 
 	for _, s := range samples {
+		if s.RoutingPolicy != "" {
+			observed[s.RoutingPolicy]++
+		}
+		if s.WorkerID != "" {
+			byWorker[s.WorkerID]++
+		}
 		if s.StatusCode == http.StatusOK {
 			succeeded++
 			completionTokens += s.ActualCompletionTokens
@@ -276,6 +341,8 @@ func summarize(samples []turnSample, runDuration time.Duration, modelsCount, per
 	}
 
 	out := summary{
+		PoliciesObserved:      observed,
+		RequestsByWorker:      byWorker,
 		ModelsCount:           modelsCount,
 		ConversationsPerModel: perModel,
 		ConversationsTotal:    convTotal,
@@ -319,11 +386,18 @@ func percentile(sorted []int64, k int) int64 {
 
 func printSummary(s summary) {
 	fmt.Println()
+	fmt.Printf("Policy:            %s\n", policyLabel(s.Policy))
+	if len(s.PoliciesObserved) > 0 {
+		fmt.Printf("Policy observed:   %s\n", formatCounts(s.PoliciesObserved))
+	}
 	fmt.Printf("Conversations:     %d (%d models x %d/model, concurrency %d)\n", s.ConversationsTotal, s.ModelsCount, s.ConversationsPerModel, s.Concurrency)
 	fmt.Printf("Requests sent:     %d\n", s.RequestsSent)
 	fmt.Printf("Succeeded:         %d   (%.1f%%)\n", s.Succeeded, s.SuccessPercent)
 	fmt.Printf("Failed:            %d   (%.1f%%)\n", s.Failed, s.FailurePercent)
 	printFailureBreakdown(s.FailuresByStatus)
+	if len(s.RequestsByWorker) > 0 {
+		fmt.Printf("Requests/worker:   %s\n", formatCounts(s.RequestsByWorker))
+	}
 	fmt.Println()
 	fmt.Println("Latency (successful requests, ms):")
 	fmt.Printf("  p50: %d\n", s.LatencySuccessful.P50)
@@ -346,6 +420,37 @@ func printSummary(s summary) {
 	fmt.Printf("  Tokens/sec:    %.0f   (sum of actual_completion_tokens / actual run duration)\n", s.TokensPerSecond)
 }
 
+// printMatrix prints one row per run so policies and concurrency levels can be
+// compared side by side.
+func printMatrix(runs []summary) {
+	fmt.Println()
+	fmt.Println("Comparison (successful requests):")
+	fmt.Printf("%-16s %5s %9s %9s %8s %8s %7s %12s\n", "policy", "conc", "p50 ms", "p95 ms", "req/s", "tok/s", "fail%", "busiest wkr")
+	for _, s := range runs {
+		fmt.Printf("%-16s %5d %9d %9d %8.2f %8.0f %7.1f %11.0f%%\n",
+			policyLabel(s.Policy), s.Concurrency,
+			s.LatencySuccessful.P50, s.LatencySuccessful.P95,
+			s.RequestsPerSecond, s.TokensPerSecond, s.FailurePercent,
+			busiestShare(s.RequestsByWorker))
+	}
+}
+
+// busiestShare is the percentage of requests served by the most-used worker.
+// An even split across N workers gives 100/N.
+func busiestShare(byWorker map[string]int) float64 {
+	total, max := 0, 0
+	for _, n := range byWorker {
+		total += n
+		if n > max {
+			max = n
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(max) / float64(total) * 100
+}
+
 func printFailureBreakdown(byStatus map[int]int) {
 	if len(byStatus) == 0 {
 		return
@@ -365,13 +470,59 @@ func printFailureBreakdown(byStatus map[int]int) {
 	fmt.Println()
 }
 
-func writeSummary(s summary) error {
-	f, err := os.Create("stress-results.json")
+func formatCounts(counts map[string]int) string {
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, counts[k]))
+	}
+	return strings.Join(parts, "  ")
+}
+
+func policyLabel(p string) string {
+	if p == "" {
+		return "server-default"
+	}
+	return p
+}
+
+// parseList splits a comma-separated flag and drops empty entries.
+func parseList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func parseInts(s string) ([]int, error) {
+	var out []int
+	for _, part := range parseList(s) {
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not an integer", part)
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no values given")
+	}
+	return out, nil
+}
+
+func writeJSON(path string, v any) error {
+	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	return enc.Encode(s)
+	return enc.Encode(v)
 }

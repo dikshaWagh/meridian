@@ -30,9 +30,11 @@ Standard tools fail:
    Ray Serve needs Python/K8s. Ollama is 1 host. Meridian optimizes **RAM-seconds + latency**.
 
 **Meridian (zero Python, single Go binary):**
-- **Token/speed-aware + tier-aware routing:** `EstimatedWait = EstTokensInFlight / RollingTokPerSec`,
-  plus `small vs premium` classifier (see §3).
-- **Fault tolerance:** 3-state health FSM, atomic reservations, session migration, 1x retry pre-headers.
+- **Token-aware routing (TW-LEL):** each request goes to the worker with the lowest predicted
+  finish time `C_w = (F_w·(I+Ō) + I + O) / R_w`, using measured tok/s, in-flight load, and the
+  request's estimated input/output tokens. The small-vs-premium classifier (§3) is still planned.
+- **Fault tolerance:** 3-state health FSM, atomic reservations, session migration, 1x retry pre-headers,
+  automatic worker restart with backoff.
 - **Compound pipeline:** OCR + LLM extraction with `/proc/meminfo` RAM admission, zero-PII JSONL logs.
 
 ---
@@ -69,7 +71,11 @@ Inference 35s, gateway <1ms => leader never bottleneck.
 | 3 Leader + Sub-nodes | `docs/04-phase-3-leader-multi-node-distribution.md` | `configs/cluster.yaml`, remote `Host/Remote`, leader+standby note | Remote kill migrates, `/status` shows LAN hosts |
 | 4 Evidence | `docs/05-phase-4-test-pitch-and-report.md` | 4 experiments, graphs, 5-slide pitch, report ch. | `docs/phase4-results/results.md` + charts |
 
-**How to use with DeepSeek (free tier):** paste ONE phase file at a time, run
+****Current status:** Phase 1 is implemented. Token-aware routing (`token-aware`, TW-LEL) is implemented
+and tested, and it is the predictive policy the UI visualises. `complexity.go` and `cost_aware.go` from
+Phase 2 are not built yet. Phase 2 benchmarks are still to be run.
+
+How to use with DeepSeek (free tier):** paste ONE phase file at a time, run
 `go test ./... && go vet ./...`, commit, then next. Never move on red.
 
 ---
@@ -82,13 +88,15 @@ cmd/
   meridian-stress/   Multi-turn p50/p95/p99 + tok/s + fault injection
 internal/
   api/               OpenAI-compatible + WorkerStatus/Catalog contracts
-  balancer/          pool, session, routing, handler, supervisor
-                     + NEW cost_aware.go, complexity.go (Phase 2)
+  balancer/          pool, session, routing, handler, supervisor, runtime
+                     token_aware.go (TW-LEL policy), stream_usage.go (SSE usage + reply capture)
+                     + NEW cost_aware.go, complexity.go (Phase 2, not built)
   tokens/            O(n) estimator (~4 chars/token, template overhead)
   ml/                OCR supervisor only (fake/tesseract), /proc/meminfo admission
   metrics/           JSONL telemetry: latency, tokens, worker, status (no PII)
   webui/             go:embed all:dist
-web/                 React+TS+Vite: Chat + Document Analyzer (OCR), cluster status
+web/                 React+TS+Vite: Chat + Document OCR, cluster status with routing policy
+                     and predicted finish times per worker
 configs/
   ml.yaml            fake OCR (tests)
   laptop-real.yaml   real tesseract OCR
@@ -114,7 +122,8 @@ exclusive mode switching, and image generation (`/v1/images/generations`,
 ### Gateway (`internal/balancer`)
 - `POST /v1/chat/completions` — `X-Conversation-ID`, `X-Meridian-Routing-Policy`, `X-Meridian-Failover`
 - `GET /v1/models`, `GET /status` (`in_flight`, `est_tokens_in_flight`, `tok_per_sec`, `host`, `sessions`)
-- `GET /policies`, `PUT /v1/policies/default` (`round-robin|random|least-connections|cost-aware`)
+- `GET /policies`, `PUT /v1/policies/default` (`round-robin|random|least-connections|token-aware`;
+  `cost-aware` planned in Phase 2)
 - `GET /healthz`, `GET /v1/catalog`
 
 ### OCR + Compound (`internal/ml`)
@@ -150,6 +159,25 @@ Health `Starting->Healthy->Unhealthy` (3 fails), `pickMu + WorkerReservation` at
 `SessionStore` migration, 1x retry before headers (non-streaming). Streaming mid-token
 loss is documented limitation — next turn reroutes, history preserved.
 
+**Worker restart:** when a llama-server process exits, its supervisor restarts it with exponential
+backoff (1s → 30s). It gives up after `--max-restarts` (default 5) consecutive failed restarts. A run that
+lasts at least a minute resets the counter. `--restart-workers=false` disables this. Shutdown never restarts.
+
+### 6.5 Token-Aware Routing (TW-LEL)
+- Score per healthy worker: `C_w = (F_w·(I+Ō) + I + O) / R_w`. Lowest score wins.
+  `F_w` = in-flight plus reserved requests; `I` = estimated input (includes stored session history);
+  `O` = `max_tokens` or 128; `Ō` = per-model mean of completed output tokens (128 before any data);
+  `R_w` = measured tok/s (workers with zero or invalid throughput are skipped).
+- Eligibility: a worker is excluded if `I+O` exceeds its per-slot context (`ctx / parallel`).
+  If no worker fits, the server returns `413 context_too_long`.
+- Pinned session requests stay on their worker. The policy applies to new conversations and moves.
+- **Limitation:** a heuristic, not an exact queueing model. Assumes queued requests are as large as the
+  new one, and that input and output tokens cost the same. Continuous batching means throughput does not
+  fall linearly with load. Improving this would require fitting the estimate to observed latency.
+- Throughput measurement: non-streaming replies use JSON usage. Streamed replies request
+  `stream_options.include_usage` and measure tok/s from the first token to the end. This needs
+  a llama-server build that supports `include_usage`.
+
 ---
 
 ## 7. Build, Run, Test
@@ -159,10 +187,15 @@ make server
 go test -race ./internal/balancer ./internal/ml && go vet ./...
 make build          # only after web/src edits
 
-# Single machine (Phase 1)
-./bin/meridian-server serve --enable-llm=true --enable-ml=false \
-  --llm-model qwen2.5-1.5b-instruct-q4_k_m.gguf --llm-workers 2 \
-  --llama-bin /usr/local/lib/ollama/llama-server --models-dir ~/models --threads 8 --ctx 4096
+# Single machine (Phase 1): repeat --llm per model, count after the colon = instances
+./bin/meridian-server serve \
+  --llm qwen2.5-0.5b-instruct-q4_k_m.gguf:2 \
+  --llm qwen2.5-3b-instruct-q4_k_m.gguf:1 \
+  --llama-bin /usr/local/lib/ollama/llama-server --models-dir ~/meridian/models \
+  --threads 8 --ctx 4096 --host 0.0.0.0 --port 8080 \
+  --ram-headroom-mb 256 --routing-policy token-aware
+# Preflight rejects the start if N x model size + headroom exceeds MemAvailable.
+# Deprecated --llm-model/--llm-workers conflict with --llm.
 
 # Leader + LAN sub-nodes (Phase 3)
 # Sub-node: llama-server --host 0.0.0.0 --port 8081 -m model.gguf --alias MODEL -t 4 -c 4096 -np 2
@@ -174,4 +207,6 @@ curl http://127.0.0.1:8080/status
 ```
 
 **Known limitations (say upfront):** no auth/TLS (trusted LAN only), in-memory sessions,
-crude token estimate, no mid-stream resume, no image generation/fine-tuning.
+crude token estimate (~4 chars/token), heuristic token-aware score (§6.5), no mid-stream resume,
+no image generation/fine-tuning. Frontend chips show the policy in effect: the chat's choice if set,
+otherwise the server default.
