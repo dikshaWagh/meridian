@@ -28,6 +28,21 @@ type RoutingPolicy interface {
 	Pick(model string, healthy []*Worker) *Worker
 }
 
+// RouteRequest describes an incoming request for policies that weigh request
+// size. Token counts are estimates made before dispatch.
+type RouteRequest struct {
+	InputTokens     int     // estimated prompt tokens, including conversation history
+	OutputTokens    int     // estimated completion tokens (max_tokens or default)
+	AvgOutputTokens float64 // historical mean completion tokens for the model
+}
+
+// SizedPolicy is implemented by policies that route on request size. The pool
+// calls PickSized instead of Pick and passes only workers whose context window
+// can hold the request.
+type SizedPolicy interface {
+	PickSized(model string, healthy []*Worker, req RouteRequest) *Worker
+}
+
 // RoundRobinPolicy sends each request to the next healthy worker.
 // This is the default policy and preserves the balancer's original behavior.
 type RoundRobinPolicy struct {
@@ -60,5 +75,6 @@ func newRoutingPolicies() []RoutingPolicy {
 		NewRoundRobinPolicy(),
 		&RandomPolicy{},
 		&LeastConnectionsPolicy{},
+		&TokenAwarePolicy{},
 	}
 }

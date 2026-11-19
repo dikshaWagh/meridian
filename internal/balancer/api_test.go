@@ -35,7 +35,7 @@ func TestSetDefaultRoutingPolicyEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if list.Default != "least-connections" || len(list.Policies) != 3 {
+	if list.Default != "least-connections" || len(list.Policies) != 4 {
 		t.Fatalf("unexpected body: %+v", list)
 	}
 
@@ -77,7 +77,7 @@ func TestCatalogListsStoppedLLMModels(t *testing.T) {
 			t.Fatalf("state = %q, want starting", m.State)
 		}
 	}
-	if len(out.RoutingPolicies) != 3 || out.DefaultRoutingPolicy == "" {
+	if len(out.RoutingPolicies) != 4 || out.DefaultRoutingPolicy == "" {
 		t.Fatalf("policies missing: %+v", out)
 	}
 }

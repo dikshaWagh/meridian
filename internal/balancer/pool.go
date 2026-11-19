@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dikshaWagh/meridian/internal/api"
+	"github.com/dikshaWagh/meridian/internal/tokens"
 )
 
 var (
@@ -21,7 +22,15 @@ var (
 	ErrNoHealthyWorker      = errors.New("no healthy worker")
 	ErrModelMismatch        = errors.New("model mismatch for session")
 	ErrUnknownRoutingPolicy = errors.New("unknown routing policy")
+	ErrContextTooLong       = errors.New("request does not fit the context window of any healthy worker")
 )
+
+// outputStats accumulates completed requests for one model. Its mean is the
+// historical output length (Obar) used by size-aware routing.
+type outputStats struct {
+	tokens   int64
+	requests int64
+}
 
 const (
 	StateStarting int32 = iota
@@ -103,6 +112,8 @@ type Pool struct {
 	store         *SessionStore
 	ctxSize       int
 	parallel      int
+	outMu         sync.Mutex
+	outputs       map[string]*outputStats
 }
 
 func NewPool(specs []WorkerSpec) *Pool {
@@ -111,6 +122,7 @@ func NewPool(specs []WorkerSpec) *Pool {
 		store:    NewSessionStore(),
 		ctxSize:  8192,
 		parallel: 2,
+		outputs:  map[string]*outputStats{},
 	}
 	for _, policy := range newRoutingPolicies() {
 		p.policies[policy.Name()] = policy
@@ -272,10 +284,10 @@ func (p *Pool) PickWithPolicy(model, policyName string) (*Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	return p.pickWith(policy, model)
+	return p.pickWith(policy, model, RouteRequest{})
 }
 
-func (p *Pool) pickWith(policy RoutingPolicy, model string) (*Worker, error) {
+func (p *Pool) pickWith(policy RoutingPolicy, model string, route RouteRequest) (*Worker, error) {
 	var known, healthy []*Worker
 	for _, w := range p.workers {
 		if w.Spec.Model == model {
@@ -291,19 +303,66 @@ func (p *Pool) pickWith(policy RoutingPolicy, model string) (*Worker, error) {
 	if len(healthy) == 0 {
 		return nil, ErrNoHealthyWorker
 	}
-	w := policy.Pick(model, healthy)
+
+	var w *Worker
+	if sized, ok := policy.(SizedPolicy); ok {
+		// A worker's context is split across its parallel slots, and a
+		// request must fit in one slot.
+		route.AvgOutputTokens = p.averageOutput(model)
+		slot := p.PerConvContext()
+		var fit []*Worker
+		for _, c := range healthy {
+			if slot <= 0 || route.InputTokens+route.OutputTokens <= slot {
+				fit = append(fit, c)
+			}
+		}
+		if len(fit) == 0 {
+			return nil, ErrContextTooLong
+		}
+		w = sized.PickSized(model, fit, route)
+	} else {
+		w = policy.Pick(model, healthy)
+	}
 	if w == nil {
 		return nil, ErrNoHealthyWorker
 	}
 	return w, nil
 }
 
+// recordOutput adds one completed request's output tokens to the model's history.
+func (p *Pool) recordOutput(model string, outTokens int) {
+	if outTokens <= 0 {
+		return
+	}
+	p.outMu.Lock()
+	defer p.outMu.Unlock()
+	s := p.outputs[model]
+	if s == nil {
+		s = &outputStats{}
+		p.outputs[model] = s
+	}
+	s.tokens += int64(outTokens)
+	s.requests++
+}
+
+// averageOutput returns the model's mean output length, or the default estimate
+// until at least one request has completed.
+func (p *Pool) averageOutput(model string) float64 {
+	p.outMu.Lock()
+	defer p.outMu.Unlock()
+	s := p.outputs[model]
+	if s == nil || s.requests == 0 {
+		return float64(tokens.DefaultOutputTokens)
+	}
+	return float64(s.tokens) / float64(s.requests)
+}
+
 // reservePick selects a worker and reserves it in one critical section, so
 // concurrent selections cannot all choose the same least-loaded worker.
-func (p *Pool) reservePick(policy RoutingPolicy, model string) (*Worker, *WorkerReservation, error) {
+func (p *Pool) reservePick(policy RoutingPolicy, model string, route RouteRequest) (*Worker, *WorkerReservation, error) {
 	p.pickMu.Lock()
 	defer p.pickMu.Unlock()
-	w, err := p.pickWith(policy, model)
+	w, err := p.pickWith(policy, model, route)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -469,7 +528,7 @@ func (p *Pool) PickForSession(model, convID string) (*Worker, *Session, error) {
 // PickForSessionWithPolicy is like PickForSession but uses the named routing
 // policy when a worker has to be chosen (new conversation or worker move).
 func (p *Pool) PickForSessionWithPolicy(model, convID, policyName string) (*Worker, *Session, error) {
-	w, sess, _, err := p.pickForSession(model, convID, policyName, false)
+	w, sess, _, err := p.pickForSession(model, convID, policyName, RouteRequest{}, false)
 	return w, sess, err
 }
 
@@ -477,10 +536,16 @@ func (p *Pool) PickForSessionWithPolicy(model, convID, policyName string) (*Work
 // reserves the selected worker until Commit or Release is called. This makes
 // policies such as least-connections safe under concurrent requests.
 func (p *Pool) PickForSessionWithPolicyReserved(model, convID, policyName string) (*Worker, *Session, *WorkerReservation, error) {
-	return p.pickForSession(model, convID, policyName, true)
+	return p.pickForSession(model, convID, policyName, RouteRequest{}, true)
 }
 
-func (p *Pool) pickForSession(model, convID, policyName string, reserve bool) (*Worker, *Session, *WorkerReservation, error) {
+// PickForSessionWithRouteReserved is PickForSessionWithPolicyReserved with the
+// request size, which size-aware policies such as token-aware need.
+func (p *Pool) PickForSessionWithRouteReserved(model, convID, policyName string, route RouteRequest) (*Worker, *Session, *WorkerReservation, error) {
+	return p.pickForSession(model, convID, policyName, route, true)
+}
+
+func (p *Pool) pickForSession(model, convID, policyName string, route RouteRequest, reserve bool) (*Worker, *Session, *WorkerReservation, error) {
 	policy, err := p.routingPolicy(policyName)
 	if err != nil {
 		return nil, nil, nil, err
@@ -488,9 +553,9 @@ func (p *Pool) pickForSession(model, convID, policyName string, reserve bool) (*
 
 	pick := func() (*Worker, *WorkerReservation, error) {
 		if reserve {
-			return p.reservePick(policy, model)
+			return p.reservePick(policy, model, route)
 		}
-		w, err := p.pickWith(policy, model)
+		w, err := p.pickWith(policy, model, route)
 		return w, nil, err
 	}
 

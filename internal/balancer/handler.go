@@ -113,7 +113,8 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	worker, sess, reservation, err := pool.PickForSessionWithPolicyReserved(req.Model, convID, policyName)
+	route := routeSize(pool, req, convID)
+	worker, sess, reservation, err := pool.PickForSessionWithRouteReserved(req.Model, convID, policyName, route)
 	if errors.Is(err, ErrUnknownRoutingPolicy) {
 		api.WriteError(w, 400, "unknown_routing_policy", err.Error())
 		return
@@ -132,6 +133,10 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, ErrModelMismatch) {
 		api.WriteError(w, 400, "model_mismatch", "conversation is bound to a different model")
+		return
+	}
+	if errors.Is(err, ErrContextTooLong) {
+		api.WriteError(w, 413, "context_too_long", "prompt exceeds the context window of every healthy worker for this model")
 		return
 	}
 	if err != nil {
@@ -223,7 +228,7 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 				sess.mu.Unlock()
 
 				// Pick new worker
-				newWorker, _, newReservation, err := pool.PickForSessionWithPolicyReserved(req.Model, convID, policyName)
+				newWorker, _, newReservation, err := pool.PickForSessionWithRouteReserved(req.Model, convID, policyName, route)
 				if err == nil && newWorker.Spec.ID != oldWorkerID {
 					sess.mu.Lock()
 					sess.WorkerID = newWorker.Spec.ID
@@ -278,6 +283,7 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 			measured := float64(usage.out) / elapsed
 			worker.UpdateSpeed(measured)
 		}
+		pool.recordOutput(req.Model, usage.out)
 	}
 
 	if convID != "" && sess != nil && rec.status == 200 && r.Context().Err() == nil && usage.assistantMsg != nil {
@@ -292,7 +298,22 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		actIn = strconv.Itoa(usage.in)
 		actOut = strconv.Itoa(usage.out)
 	}
-	log.Printf("model=%s worker=%s status=%d time=%dms est_in=%d est_out<=%d act_in=%s act_out=%s", req.Model, worker.Spec.ID, rec.status, time.Since(start).Milliseconds(), est.Input, est.Output, actIn, actOut)
+	log.Printf("model=%s policy=%s worker=%s status=%d time=%dms est_in=%d est_out<=%d act_in=%s act_out=%s", req.Model, usedPolicy, worker.Spec.ID, rec.status, time.Since(start).Milliseconds(), est.Input, est.Output, actIn, actOut)
+}
+
+// routeSize estimates the request's size for size-aware routing. For a
+// conversation, the stored history is part of what the worker will read.
+func routeSize(pool *Pool, req api.ChatRequest, convID string) RouteRequest {
+	msgs := req.Messages
+	if convID != "" {
+		if sess, ok := pool.SessionStore().Get(convID); ok {
+			sess.mu.Lock()
+			msgs = append(append([]api.Message{}, sess.Messages...), req.Messages...)
+			sess.mu.Unlock()
+		}
+	}
+	est := tokens.ForRequest(api.ChatRequest{Messages: msgs, MaxTokens: req.MaxTokens})
+	return RouteRequest{InputTokens: est.Input, OutputTokens: est.Output}
 }
 
 func captureUsage(resp *http.Response, usage *requestUsage) error {
