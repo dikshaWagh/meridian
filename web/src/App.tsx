@@ -55,6 +55,9 @@ export default function App() {
     models.find((m) => m.healthy)?.id ??
     models[0]?.id ??
     ''
+  // The policy the next request will use: the chat's own choice if set,
+  // otherwise the server default.
+  const policyName = prefs.policy || catalog.data?.default_routing_policy || ''
   const active: Conversation | null = convs.list.find((c) => c.id === convs.activeId) ?? null
 
   const send = async (text: string) => {
@@ -120,8 +123,12 @@ export default function App() {
           </button>
         </nav>
         <div className="topbar-right">
-          <span className="badge badge-policy" title="Default routing policy">
-            routing: {catalog.data?.default_routing_policy || '—'}
+          <span
+            className="badge badge-policy"
+            title={prefs.policy ? 'Routing policy selected for chat requests' : 'Server default routing policy'}
+          >
+            routing: {policyName || '—'}
+            {prefs.policy ? ' (chat)' : ''}
           </span>
           {catalog.error ? (
             <span className="badge badge-warn" title={catalog.error}>gateway unreachable</span>
@@ -176,7 +183,7 @@ export default function App() {
           )}
         </main>
 
-        <ClusterPanel models={models} policy={catalog.data?.default_routing_policy ?? ''} />
+        <ClusterPanel models={models} policy={policyName} />
       </div>
     </div>
   )
