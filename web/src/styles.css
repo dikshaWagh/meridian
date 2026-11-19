@@ -232,6 +232,38 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .ocr-lines { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
 .ocr-lines th, .ocr-lines td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border); }
 
+/* ---------- routing policy and predictions ---------- */
+
+.head-badges { display: flex; gap: 6px; align-items: center; }
+.badge-policy { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.badge-next { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.policy-line { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.worker-next { border-color: var(--ok); box-shadow: 0 0 0 1px var(--ok-soft); }
+.predict { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.predict-value { margin-left: auto; font-weight: 650; font-variant-numeric: tabular-nums; }
+.predict-fill { background: var(--warn); }
+.worker-next .predict-fill { background: var(--ok); }
+
+/* ---------- motion (CSS only) ---------- */
+
+@keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px var(--ok-soft); }
+  50% { box-shadow: 0 0 0 4px var(--ok-soft); }
+}
+@keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+.worker { animation: fade-in 0.3s ease both; transition: border-color 0.3s ease; }
+.worker-next { animation: glow-pulse 2.4s ease-in-out infinite; }
+.worker-healthy .dot { animation: dot-pulse 2.4s ease-in-out infinite; }
+.worker-starting .dot { animation: dot-pulse 1s ease-in-out infinite; }
+.bar-fill, .predict-fill { transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1), background 0.3s ease; }
+.btn, .tab, .conv { transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
 @media (max-width: 1100px) {
   .layout, .layout-no-sidebar { grid-template-columns: 1fr; }
   .app { height: auto; min-height: 100vh; }

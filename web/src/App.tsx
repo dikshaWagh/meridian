@@ -120,6 +120,9 @@ export default function App() {
           </button>
         </nav>
         <div className="topbar-right">
+          <span className="badge badge-policy" title="Default routing policy">
+            routing: {catalog.data?.default_routing_policy || '—'}
+          </span>
           {catalog.error ? (
             <span className="badge badge-warn" title={catalog.error}>gateway unreachable</span>
           ) : (
@@ -173,7 +176,7 @@ export default function App() {
           )}
         </main>
 
-        <ClusterPanel models={models} />
+        <ClusterPanel models={models} policy={catalog.data?.default_routing_policy ?? ''} />
       </div>
     </div>
   )
