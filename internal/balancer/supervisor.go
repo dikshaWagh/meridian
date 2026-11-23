@@ -52,6 +52,9 @@ type Options struct {
 
 	// LLMConfigs lists every model this node serves and its instance count.
 	LLMConfigs []LLMConfig
+	// ReplicaPortBase is the first loopback port for replicas. Zero keeps the
+	// standalone default of 8081.
+	ReplicaPortBase int
 
 	// DEPRECATED: kept for backwards compatibility; converted to LLMConfigs
 	// LLMModel serves one GGUF file instead of the built-in worker set.
@@ -310,6 +313,9 @@ func validateLLMConfigs(cfgs []LLMConfig) error {
 func workerSpecs(o Options) []WorkerSpec {
 	var allSpecs []WorkerSpec
 	portNum := 8081
+	if o.ReplicaPortBase > 0 {
+		portNum = o.ReplicaPortBase
+	}
 
 	for _, cfg := range o.LLMConfigs {
 		file := strings.TrimSpace(cfg.Model)

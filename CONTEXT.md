@@ -42,22 +42,26 @@ Standard tools fail:
 ## 2. Target Architecture
 
 ```text
-Leader = Meridian Gateway (1x Go binary, :8080)
-  Token Estimator -> Classifier (simple/complex) -> Cost-Aware Router
+Leader = Meridian Gateway (1x Go binary, :8080) — fixed, first node in cluster.yaml
+  Load balancer: healthy-worker filter -> routing policy -> atomic reservation -> forward
+  Heartbeat monitor: GET /health on every worker, every 2 s (§6.6)
   SessionStore | Health FSM | Atomic Reservations | /v1/catalog + /status
         |                                  |
-  Local workers (spawned)          Remote LAN sub-nodes (already running)
+  Local workers (spawned)          Remote LAN workers (llama-server, no agent)
   llama-server xN (small/premium)  llama-server xN (small/premium, various models)
   tesseract OCR                    tesseract OCR (remote, 0.0.0.0 on sub-node)
 
-Leader = control plane only. Workers stateless.
+Clients talk only to the leader. Workers run llama-server (and OCR) and answer /health.
 Inference 35s, gateway <1ms => leader never bottleneck.
 ```
 
 - **Node:** may serve various models (catalog), multiple instances of same small model for
   throughput/isolation (see §6.2). Large models: 1 instance + `-np` slots.
-- **Leader failover:** static leader + standby gateway, manual start, client replays history.
-  No Raft/gossip (overkill for 2-5 node LAN, state this in viva).
+- **Fixed leader:** the first node in `cluster.yaml` is always the leader. No election, no Raft,
+  no gossip. Clients send requests only to the leader, which does all load balancing.
+- **Leader loss:** the cluster stops accepting requests until the leader is restarted (same
+  `cluster.yaml`, started by hand on the same or a standby machine). Models keep running on
+  workers. In-memory sessions are lost and clients resend history. Documented limitation, not solved.
 
 ---
 
@@ -68,12 +72,14 @@ Inference 35s, gateway <1ms => leader never bottleneck.
 | 0 Trim | `docs/01-phase-0-trim-the-fat.md` | Delete arbiter/SD/stubs, LLM+OCR only, green build | `grep arbiter/SD` = 0, `go test ./...` green |
 | 1 Single-machine FT | `docs/02-phase-1-single-machine-fault-tolerance.md` | Kill w2 on 1 host, chats continue | Kill test >=95% success, `session moved`, `tok_per_sec` in `/status` |
 | 2 Small vs Premium | `docs/03-phase-2-intelligent-workload-allocation.md` | `complexity.go` + `cost_aware.go`, cost vs quality proof | p95 lower than all-premium, quality drop <=0.5/5 |
-| 3 Leader + Sub-nodes | `docs/04-phase-3-leader-multi-node-distribution.md` | `configs/cluster.yaml`, remote `Host/Remote`, leader+standby note | Remote kill migrates, `/status` shows LAN hosts |
+| 3 Fixed leader + LAN workers | `docs/04-phase-3-leader-multi-node-distribution.md` | `configs/cluster.yaml` lists remote `llama-server` workers; leader heartbeats them and load-balances across local and remote; leader-loss limitation documented | Remote worker kill detected within ~6 s and traffic moves; `/status` shows LAN hosts |
 | 4 Evidence | `docs/05-phase-4-test-pitch-and-report.md` | 4 experiments, graphs, 5-slide pitch, report ch. | `docs/phase4-results/results.md` + charts |
 
-****Current status:** Phase 1 is implemented. Token-aware routing (`token-aware`, TW-LEL) is implemented
-and tested, and it is the predictive policy the UI visualises. `complexity.go` and `cost_aware.go` from
-Phase 2 are not built yet. Phase 2 benchmarks are still to be run.
+**Current status:** Phase 1 is implemented. Token-aware routing (`token-aware`, TW-LEL) is implemented
+and tested, and it is the predictive policy the UI visualises. Worker heartbeats (`/health` polling,
+§6.6) and load balancing across local workers already exist. `complexity.go` and `cost_aware.go` from
+Phase 2 are not built yet. Phase 2 benchmarks are still to be run. Phase 3 extends the existing
+heartbeat and balancer to remote workers from `cluster.yaml`; it adds no election.
 
 How to use with DeepSeek (free tier):** paste ONE phase file at a time, run
 `go test ./... && go vet ./...`, commit, then next. Never move on red.
@@ -100,7 +106,8 @@ web/                 React+TS+Vite: Chat + Document OCR, cluster status with rou
 configs/
   ml.yaml            fake OCR (tests)
   laptop-real.yaml   real tesseract OCR
-  cluster.yaml       [NEW Phase 3] leader worker list: id/model/host/port/file/remote
+  cluster.yaml       [Phase 3] worker list for the fixed leader: id, model, host, port, local|remote.
+                     First node listed is the leader.
 docs/
   00-overview-and-roadmap.md     Product claim + phase order (read first)
   01-phase-0-trim-the-fat.md     Phase 0 deletions + acceptance
@@ -136,9 +143,16 @@ exclusive mode switching, and image generation (`/v1/images/generations`,
 ## 6. Key Design Decisions (Viva-Ready)
 
 ### 6.1 Leader Arbitration
-Single leader for deterministic routing + session stickiness. Workers stateless, so leader
-loss loses only in-memory sessions (200, 30m TTL), not models. Standby takes `:8080`.
-Gateway cost << inference, so no bottleneck. Raft omitted deliberately for explainability.
+The first node listed in `cluster.yaml` is the leader, permanently. There is no election. The
+leader does three things:
+1. **Heartbeat:** probes every worker's `/health` (§6.6).
+2. **Load balancing:** picks a worker for each request among healthy workers only, using the routing policy.
+3. **Session stickiness:** keeps a conversation on its worker while that worker is healthy.
+
+Workers are stateless, so losing the leader loses only in-memory sessions (200, 30m TTL), not models.
+Recovery is a manual restart. Gateway cost << inference, so the leader is not a bottleneck at LAN scale.
+Raft and gossip are omitted deliberately: with one leader and 2-5 nodes, consensus costs more than it
+gains, and the failure mode is simple to explain in a viva.
 
 ### 6.2 Multiple Instances, Same Model, Same Node
 - Small Q4 (0.5-1.5B, ~0.4-1.1GB): 2 instances allowed under RAM admission.
@@ -178,6 +192,26 @@ lasts at least a minute resets the counter. `--restart-workers=false` disables t
   `stream_options.include_usage` and measure tok/s from the first token to the end. This needs
   a llama-server build that supports `include_usage`.
 
+### 6.6 Heartbeats and Load Balancing
+**What exists today (single machine).** `Pool.StartHealthChecks` in `internal/balancer/pool.go`
+calls `GET /health` on every worker every 2 s, with a 2 s timeout. Per-worker state:
+- `Starting`: not routed to until the first successful probe, within a readiness grace period.
+- `Healthy` -> `Unhealthy` after 3 consecutive failed probes. A `503` (model still loading) counts as not ready.
+- `Unhealthy` -> `Healthy` after one successful probe.
+- A process exit marks the worker `Unhealthy` immediately.
+
+**Phase 3 extends this to remote workers.** The leader probes each remote `llama-server` over the LAN
+with the same check. No agent runs on remote nodes. A failed worker is detected in about 6 s (3 x 2 s).
+
+**Load balancing.** Only the leader balances load. For each request it filters to healthy workers for
+the model, applies the selected policy (§6.5 for `token-aware`), reserves capacity atomically, forwards,
+and streams the reply. Local and remote workers are treated identically. The policy sees measured tok/s,
+in-flight count, and context size, not where the worker runs.
+
+**Known gap.** There is no node-level heartbeat. A remote machine that disappears is seen only through
+its workers failing probes, so `/status` cannot yet tell "machine off" from "llama-server crashed".
+Adding a host-level check is a Phase 3 follow-up.
+
 ---
 
 ## 7. Build, Run, Test
@@ -197,7 +231,8 @@ make build          # only after web/src edits
 # Preflight rejects the start if N x model size + headroom exceeds MemAvailable.
 # Deprecated --llm-model/--llm-workers conflict with --llm.
 
-# Leader + LAN sub-nodes (Phase 3)
+# Fixed leader + LAN workers (Phase 3). The first node in cluster.yaml is the leader.
+# Sub-node runs llama-server only; the leader probes its /health and balances requests to it.
 # Sub-node: llama-server --host 0.0.0.0 --port 8081 -m model.gguf --alias MODEL -t 4 -c 4096 -np 2
 ./bin/meridian-server serve --cluster-config configs/cluster.yaml
 
@@ -206,7 +241,8 @@ make build          # only after web/src edits
 curl http://127.0.0.1:8080/status
 ```
 
-**Known limitations (say upfront):** no auth/TLS (trusted LAN only), in-memory sessions,
+**Known limitations (say upfront):** no auth/TLS (trusted LAN only), fixed leader is a single point of
+failure (manual restart, no election), no node-level heartbeat yet (§6.6), in-memory sessions,
 crude token estimate (~4 chars/token), heuristic token-aware score (§6.5), no mid-stream resume,
 no image generation/fine-tuning. Frontend chips show the policy in effect: the chat's choice if set,
 otherwise the server default.

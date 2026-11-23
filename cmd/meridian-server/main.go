@@ -1,51 +1,18 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"runtime/debug"
-	"strconv"
-	"strings"
 
 	"github.com/dikshaWagh/meridian/internal/balancer"
+	"github.com/dikshaWagh/meridian/internal/cluster"
+	"github.com/dikshaWagh/meridian/internal/config"
 	"github.com/dikshaWagh/meridian/internal/ml"
 )
-
-// llmFlagSlice implements flag.Value to parse repeatable --llm flags.
-// Format: "model.gguf:2" or "model.gguf" (defaults to 1 worker).
-type llmFlagSlice []string
-
-func (f *llmFlagSlice) String() string {
-	return strings.Join(*f, ",")
-}
-
-func (f *llmFlagSlice) Set(value string) error {
-	*f = append(*f, value)
-	return nil
-}
-
-// toConfigs parses "model.gguf[:workers]" values. The count follows the last
-// colon; a missing count means one instance, and a malformed count is an error.
-func (f llmFlagSlice) toConfigs() ([]balancer.LLMConfig, error) {
-	var configs []balancer.LLMConfig
-	for _, raw := range f {
-		value := strings.TrimSpace(raw)
-		model, workers := value, 1
-		if i := strings.LastIndex(value, ":"); i >= 0 {
-			n, err := strconv.Atoi(strings.TrimSpace(value[i+1:]))
-			if err != nil || n < 1 {
-				return nil, fmt.Errorf("--llm %q: worker count must be a positive integer", raw)
-			}
-			model, workers = strings.TrimSpace(value[:i]), n
-		}
-		if model == "" {
-			return nil, fmt.Errorf("--llm %q: missing model file", raw)
-		}
-		configs = append(configs, balancer.LLMConfig{Model: model, Workers: workers})
-	}
-	return configs, nil
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -57,47 +24,22 @@ func main() {
 		printVersion()
 		return
 	case "serve":
-		fs := flag.NewFlagSet("serve", flag.ExitOnError)
-		o := balancer.Options{}
-		fs.StringVar(&o.Host, "host", "0.0.0.0", "balancer bind address")
-		fs.IntVar(&o.Port, "port", 8080, "balancer port")
-		fs.StringVar(&o.ModelsDir, "models-dir", "~/models", "GGUF model directory")
-		fs.StringVar(&o.LlamaBin, "llama-bin", "llama-server", "llama-server binary")
-		fs.IntVar(&o.Threads, "threads", 4, "threads per worker")
-		fs.IntVar(&o.Context, "ctx", 8192, "worker context size")
-		fs.IntVar(&o.Parallel, "parallel", 2, "parallel slots per worker")
-		fs.IntVar(&o.NGL, "ngl", 0, "GPU layers per worker (0 = CPU only)")
-		fs.IntVar(&o.GPUWorkers, "gpu-workers", 1, "number of workers to offload to GPU")
-		fs.StringVar(&o.BackendLib, "backend-lib", "", "llama.cpp backend .so (e.g. Vulkan)")
-		fs.StringVar(&o.GPUDevice, "gpu-device", "", "device name, e.g. Vulkan1")
-		fs.StringVar(&o.RoutingPolicy, "routing-policy", "round-robin", "default routing policy (see /policies)")
-		fs.BoolVar(&o.EnableLLM, "enable-llm", true, "enable the LLM serving subsystem")
-		fs.BoolVar(&o.EnableML, "enable-ml", false, "enable the OCR serving subsystem")
-		fs.StringVar(&o.LLMModel, "llm-model", "", "[DEPRECATED] serve one GGUF model file instead of the built-in worker set (use --llm instead)")
-		fs.StringVar(&o.LLMModelName, "llm-model-name", "", "[DEPRECATED] public model id for --llm-model (use --llm instead)")
-		fs.IntVar(&o.LLMWorkers, "llm-workers", 1, "[DEPRECATED] number of workers for --llm-model (use --llm instead)")
-		fs.StringVar(&o.MLConfig, "ml-config", "configs/ml.yaml", "path to the ML YAML configuration")
-		fs.IntVar(&o.RAMHeadroomMB, "ram-headroom-mb", 1024, "RAM kept free after admitting all LLM instances")
-		fs.BoolVar(&o.RestartWorkers, "restart-workers", true, "restart a worker process automatically when it exits")
-		fs.IntVar(&o.MaxRestarts, "max-restarts", 5, "consecutive failed restarts before a worker is left down")
-
-		var llmFlags llmFlagSlice
-		fs.Var(&llmFlags, "llm", "model file with optional instance count, e.g. qwen.gguf:2 (repeat for each model; count defaults to 1)")
-
-		fs.Parse(os.Args[2:])
-
-		if o.LLMModel != "" && len(llmFlags) > 0 {
-			fmt.Fprintln(os.Stderr, "error: use either --llm or the deprecated --llm-model, not both")
-			os.Exit(2)
+		cfg, err := config.Parse(os.Args[2:], os.LookupEnv)
+		if errors.Is(err, flag.ErrHelp) {
+			return
 		}
-		configs, err := llmFlags.toConfigs()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(2)
 		}
-		o.LLMConfigs = configs
-
-		if err := balancer.Run(o); err != nil {
+		if cfg.Role != config.RoleStandalone {
+			if err := runCluster(cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if err := balancer.Run(cfg.Options); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -119,6 +61,20 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: meridian-server <serve|ml-worker|version> [flags]")
 	os.Exit(2)
+}
+
+// runCluster checks this machine, logs the resolved settings and runs the role.
+func runCluster(cfg *config.ServeConfig) error {
+	if err := cfg.Prepare(); err != nil {
+		return err
+	}
+	for _, line := range cfg.Describe() {
+		log.Println(line)
+	}
+	if cfg.Role == config.RoleWorker {
+		return cluster.RunWorker(cfg)
+	}
+	return cluster.RunLeader(cfg)
 }
 
 // printVersion reports which executable is actually running and how it was

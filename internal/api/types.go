@@ -70,6 +70,54 @@ type StatusResponse struct {
 	SessionCount int            `json:"sessionCount"`
 }
 
+// NodeStatus is one machine in the cluster, as served by GET /v1/status.
+type NodeStatus struct {
+	NodeID        string   `json:"node_id"`
+	Address       string   `json:"address"`
+	HTTPPort      int      `json:"http_port"`
+	Local         bool     `json:"local"`
+	State         string   `json:"state"`
+	CPUCores      int      `json:"cpu_cores"`
+	RAMTotalMB    int64    `json:"ram_total_mb"`
+	CPUPercent    float64  `json:"cpu_percent"`
+	RAMUsedMB     int64    `json:"ram_used_mb"`
+	LastHeartbeat string   `json:"last_heartbeat"`
+	RegisteredAt  string   `json:"registered_at"`
+	ReplicaIDs    []string `json:"replica_ids"`
+}
+
+// ReplicaStatus is one replica in GET /v1/status. State is "unavailable" while
+// its node is offline; LastState keeps the state it had before.
+type ReplicaStatus struct {
+	ID                string  `json:"id"`
+	NodeID            string  `json:"node_id"`
+	Model             string  `json:"model"`
+	Instance          int     `json:"instance"`
+	ModelVersion      string  `json:"model_version,omitempty"`
+	Kind              string  `json:"kind"`
+	Runtime           string  `json:"runtime"`
+	Endpoint          string  `json:"endpoint"`
+	ContextWindow     int     `json:"context_window"`
+	MaxConcurrent     int     `json:"max_concurrent"`
+	State             string  `json:"state"`
+	LastState         string  `json:"last_state,omitempty"`
+	Healthy           bool    `json:"healthy"`
+	InFlight          int64   `json:"in_flight"`
+	QueueDepth        int64   `json:"queue_depth"`
+	Served            int64   `json:"served"`
+	EstTokensInFlight int64   `json:"est_tokens_in_flight"`
+	TokPerSec         float64 `json:"tok_per_sec"`
+	LastCheck         string  `json:"last_check"`
+	LastError         string  `json:"last_error"`
+}
+
+// ClusterStatusResponse is the body of GET /v1/status on the leader.
+type ClusterStatusResponse struct {
+	LeaderID string          `json:"leader_id"`
+	Nodes    []NodeStatus    `json:"nodes"`
+	Replicas []ReplicaStatus `json:"replicas"`
+}
+
 type RoutingPolicyInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`

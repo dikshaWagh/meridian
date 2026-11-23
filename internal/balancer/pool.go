@@ -671,10 +671,15 @@ func (p *Pool) StartSessionSweeper(ctx context.Context) {
 }
 
 func (p *Pool) StartHealthChecks(ctx context.Context) {
+	p.StartHealthChecksEvery(ctx, 2*time.Second)
+}
+
+// StartHealthChecksEvery probes every worker's /health at the given interval.
+func (p *Pool) StartHealthChecksEvery(ctx context.Context, interval time.Duration) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	go func() {
 		p.checkAll(client)
-		t := time.NewTicker(2 * time.Second)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
