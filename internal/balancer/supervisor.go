@@ -569,3 +569,9 @@ func lanURL(port int) string {
 	}
 	return fmt.Sprintf("http://%s:%d", ip, port)
 }
+
+// WithCORS applies the same CORS policy as the standalone gateway. The cluster
+// leader uses it so the Vite dev server and the embedded UI behave the same way.
+func WithCORS(next http.Handler) http.Handler {
+	return withCORS(next)
+}

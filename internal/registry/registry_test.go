@@ -111,7 +111,8 @@ func TestEligibleReplicasFilters(t *testing.T) {
 		replica("draining", "n1", "m", ReplicaDraining),
 		busy,
 	})
-	_ = r.UpdateReplicaStats("busy", ReplicaStats{InFlight: 2})
+	r.Reserve("busy")
+	r.Reserve("busy")
 	got := r.EligibleReplicas("m")
 	if len(got) != 1 || got[0].ReplicaID != "ready" {
 		t.Fatalf("eligible = %+v", got)
@@ -186,7 +187,7 @@ func TestConcurrentUpdatesAreRaceFree(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 200; j++ {
-				_ = r.UpdateReplicaStats(id+"-1", ReplicaStats{InFlight: int64(j % 3)})
+				_ = r.UpdateReplicaStats(id+"-1", ReplicaStats{Served: int64(j)})
 			}
 		}()
 		go func() {
@@ -205,4 +206,36 @@ func TestConcurrentUpdatesAreRaceFree(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestReserveRespectsLimitAndRelease(t *testing.T) {
+	r := New()
+	_ = r.ReplaceNode(node("n1"), []ReplicaRecord{replica("a-1", "n1", "a", ReplicaReady)})
+	if !r.Reserve("a-1") || !r.Reserve("a-1") {
+		t.Fatal("first two reservations (max_concurrent 2) should succeed")
+	}
+	if r.Reserve("a-1") {
+		t.Fatal("third reservation must fail at max_concurrent")
+	}
+	r.Release("a-1", true)
+	rep, _ := r.Replica("a-1")
+	if rep.InFlight != 1 || rep.Served != 1 {
+		t.Fatalf("after release: in_flight=%d served=%d", rep.InFlight, rep.Served)
+	}
+	if r.Reserve("missing") {
+		t.Fatal("unknown replica reserved")
+	}
+}
+
+func TestReserveFailsOnUnhealthyOrOfflineReplica(t *testing.T) {
+	r := New()
+	_ = r.ReplaceNode(node("n1"), []ReplicaRecord{replica("a-1", "n1", "a", ReplicaLoading)})
+	if r.Reserve("a-1") {
+		t.Fatal("loading replica reserved")
+	}
+	_ = r.UpdateReplicaState("a-1", ReplicaReady)
+	r.MarkNodeOffline("n1", t0)
+	if r.Reserve("a-1") {
+		t.Fatal("replica on offline node reserved")
+	}
 }

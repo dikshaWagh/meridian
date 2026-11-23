@@ -26,6 +26,7 @@ type replicaView struct {
 	Instance int
 	Port     int
 	Status   api.WorkerStatus
+	Worker   *balancer.Worker
 }
 
 // replicaViews lists the pool's replicas in pool order. ID is
@@ -37,16 +38,18 @@ func replicaViews(nodeID string, pool *balancer.Pool) []replicaView {
 	}
 	instances := map[string]int{}
 	snaps := pool.Snapshot()
+	workers := pool.Workers()
 	out := make([]replicaView, 0, len(snaps))
-	for _, s := range snaps {
+	for i, s := range snaps {
 		instances[s.Model]++
-		i := instances[s.Model]
+		n := instances[s.Model]
 		out = append(out, replicaView{
-			ID:       fmt.Sprintf("%s-%s-%d", s.Model, short, i),
+			ID:       fmt.Sprintf("%s-%s-%d", s.Model, short, n),
 			Model:    s.Model,
-			Instance: i,
+			Instance: n,
 			Port:     s.Port,
 			Status:   s,
+			Worker:   workers[i],
 		})
 	}
 	return out

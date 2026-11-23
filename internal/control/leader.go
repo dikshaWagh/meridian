@@ -383,7 +383,6 @@ func hardwareOf(h HardwareInfo) registry.Hardware {
 
 func replicaStats(r ReplicaStatus, now time.Time) registry.ReplicaStats {
 	return registry.ReplicaStats{
-		InFlight:          r.InFlight,
 		QueueDepth:        r.QueueDepth,
 		Served:            r.Served,
 		EstTokensInFlight: r.EstTokensInFlight,

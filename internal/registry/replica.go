@@ -41,7 +41,6 @@ type ReplicaRecord struct {
 
 // ReplicaStats is the per-replica counters reported with heartbeats.
 type ReplicaStats struct {
-	InFlight          int64
 	QueueDepth        int64
 	Served            int64
 	EstTokensInFlight int64

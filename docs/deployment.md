@@ -65,6 +65,10 @@ With `--leader-addr`, the worker skips discovery.
 - `--node-id` is stored in `<state-dir>/node-id`. Keep that file when a machine is reimaged if you want the same identity.
 - Replica ports are bound to 127.0.0.1 only. Only `--port` is reachable from the LAN.
 
+### Using the web UI
+
+Open `http://LEADER_IP:8080/` in a browser on the LAN. Chat requests from the UI go to the leader, which picks the replica and forwards the request. The UI shows every model in the cluster, and the routing policy can be changed in the UI.
+
 ### Checking the cluster
 
 ```bash
@@ -84,6 +88,7 @@ This lists every node and replica, with its state, its endpoint, and its last er
 
 ### Known limits
 
-- Routing and the public chat endpoint across machines are not in this release (Stage 4). `/v1/status` shows the cluster; chat still goes to a single-machine server.
+- Sticky conversations (`X-Conversation-ID`) are not routed across machines yet. Each chat request is routed on its own.
+- The leader sends requests to each worker's `--port`, so that port must accept connections from the leader's address.
 - No TLS. Prompts and responses are plain text on the LAN.
 - The leader is still a single point of failure. Restart it by hand.

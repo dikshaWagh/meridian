@@ -56,7 +56,7 @@ func RunWorker(cfg *config.ServeConfig) error {
 	if err != nil {
 		return fmt.Errorf("http port: %w", err)
 	}
-	srv := &http.Server{Handler: workerMux(), ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Handler: workerMux(nodeID, secret, replicas.Pool), ReadHeaderTimeout: 5 * time.Second}
 	httpErr := make(chan error, 1)
 	go func() {
 		if err := srv.Serve(httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -102,12 +102,13 @@ func RunWorker(cfg *config.ServeConfig) error {
 	return nil
 }
 
-// workerMux serves only /healthz. Workers have no public API; /replicas/...
-// is added with routing in Stage 4.
-func workerMux() http.Handler {
+// workerMux serves /healthz and the leader's signed /replicas/{id}/... path.
+// Workers have no public API.
+func workerMux(nodeID string, secret []byte, pool *balancer.Pool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.Handle("POST /replicas/{id}/{rest...}", replicaHandler(nodeID, secret, pool))
 	return mux
 }

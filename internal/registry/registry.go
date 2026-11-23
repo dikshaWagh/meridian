@@ -30,6 +30,10 @@ type Registry interface {
 	UpsertReplica(r ReplicaRecord) error
 	UpdateReplicaState(replicaID string, s ReplicaState) error
 	UpdateReplicaStats(replicaID string, stats ReplicaStats) error
+	// Reserve takes one in-flight slot on an eligible replica. It reports false
+	// when the replica is no longer eligible. Release returns the slot.
+	Reserve(replicaID string) bool
+	Release(replicaID string, served bool)
 
 	Node(nodeID string) (NodeRecord, bool)
 	Replica(replicaID string) (ReplicaRecord, bool)
@@ -199,7 +203,6 @@ func (m *memRegistry) UpdateReplicaStats(replicaID string, stats ReplicaStats) e
 	if !ok {
 		return ErrNotFound
 	}
-	r.InFlight = stats.InFlight
 	r.QueueDepth = stats.QueueDepth
 	r.Served = stats.Served
 	r.EstTokensInFlight = stats.EstTokensInFlight
@@ -207,6 +210,43 @@ func (m *memRegistry) UpdateReplicaStats(replicaID string, stats ReplicaStats) e
 	r.LastCheck = stats.LastCheck
 	r.LastError = stats.LastError
 	return nil
+}
+
+func (m *memRegistry) Reserve(replicaID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.replicas[replicaID]
+	if !ok || !m.eligible(*r) {
+		return false
+	}
+	r.InFlight++
+	return true
+}
+
+func (m *memRegistry) Release(replicaID string, served bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.replicas[replicaID]
+	if !ok {
+		return
+	}
+	if r.InFlight > 0 {
+		r.InFlight--
+	}
+	if served {
+		r.Served++
+	}
+}
+
+// eligible reports whether r may take a new request. Callers hold m.mu.
+func (m *memRegistry) eligible(r ReplicaRecord) bool {
+	if r.State != ReplicaReady || !r.Healthy {
+		return false
+	}
+	if n, ok := m.nodes[r.NodeID]; !ok || n.State != NodeOnline {
+		return false
+	}
+	return r.MaxConcurrent <= 0 || r.InFlight < int64(r.MaxConcurrent)
 }
 
 func (m *memRegistry) Node(nodeID string) (NodeRecord, bool) {
@@ -259,16 +299,9 @@ func (m *memRegistry) EligibleReplicas(model string) []ReplicaRecord {
 	defer m.mu.RUnlock()
 	var out []ReplicaRecord
 	for _, r := range m.replicas {
-		if r.Model != model || r.State != ReplicaReady || !r.Healthy {
-			continue
+		if r.Model == model && m.eligible(*r) {
+			out = append(out, *r)
 		}
-		if n, ok := m.nodes[r.NodeID]; !ok || n.State != NodeOnline {
-			continue
-		}
-		if r.MaxConcurrent > 0 && r.InFlight >= int64(r.MaxConcurrent) {
-			continue
-		}
-		out = append(out, *r)
 	}
 	sortReplicas(out)
 	return out

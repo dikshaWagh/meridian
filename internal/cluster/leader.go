@@ -25,6 +25,7 @@ import (
 	"github.com/dikshaWagh/meridian/internal/discovery"
 	"github.com/dikshaWagh/meridian/internal/health"
 	"github.com/dikshaWagh/meridian/internal/registry"
+	"github.com/dikshaWagh/meridian/internal/webui"
 )
 
 const (
@@ -94,6 +95,10 @@ func RunLeader(cfg *config.ServeConfig) error {
 		return fmt.Errorf("http port: %w", err)
 	}
 
+	router, err := balancer.NewClusterRouter(cfg.Options.RoutingPolicy)
+	if err != nil {
+		return err
+	}
 	ctrl := control.NewLeader(control.LeaderConfig{
 		NodeID:       nodeID,
 		Secret:       secret,
@@ -112,6 +117,11 @@ func RunLeader(cfg *config.ServeConfig) error {
 		DiscoveryInterval: cl.DiscoveryInterval,
 		SyncLocal: func(t time.Time) {
 			for _, rec := range localReplicas(nodeID, replicas.Pool, cfg.Options, t) {
+				// The registry owns the leader's in-flight and served counts, so
+				// keep them. The pool does not see requests routed by the leader.
+				if cur, ok := reg.Replica(rec.ReplicaID); ok {
+					rec.InFlight, rec.Served = cur.InFlight, cur.Served
+				}
 				if err := reg.UpsertReplica(rec); err != nil {
 					log.Printf("sync local replica %s: %v", rec.ReplicaID, err)
 				}
@@ -119,7 +129,7 @@ func RunLeader(cfg *config.ServeConfig) error {
 		},
 	})
 
-	srv := &http.Server{Handler: leaderMux(reg, nodeID), ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Handler: leaderHandler(reg, router, secret, nodeID), ReadHeaderTimeout: 5 * time.Second}
 	errc := make(chan error, 1)
 	var wg sync.WaitGroup
 	run := func(f func() error) {
@@ -176,15 +186,11 @@ func localNode(nodeID, advertise string, httpPort int, now time.Time) registry.N
 	}
 }
 
-func leaderMux(reg registry.Registry, leaderID string) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		api.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
-		api.WriteJSON(w, http.StatusOK, statusOf(reg, leaderID))
-	})
-	return mux
+// leaderHandler is the public API: the cluster gateway behind CORS, with the
+// embedded web UI served for every other path.
+func leaderHandler(reg registry.Registry, router *balancer.ClusterRouter, secret []byte, leaderID string) http.Handler {
+	gw := newGateway(reg, router, secret, leaderID)
+	return webui.Handler(balancer.WithCORS(gw.handler()))
 }
 
 func statusOf(reg registry.Registry, leaderID string) api.ClusterStatusResponse {
