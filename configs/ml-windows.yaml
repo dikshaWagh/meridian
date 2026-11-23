@@ -1,0 +1,35 @@
+# Meridian OCR configuration for a Windows development machine.
+#
+# Same as configs/ml.yaml, but the declared RAM budget is zero so admission
+# control can start the worker without a Linux /proc/meminfo probe. The fake
+# engine needs no model weights, so this config runs anywhere.
+#
+#   .\bin\meridian-server.exe serve --enable-llm=false --enable-ml=true \
+#       --ml-config .\configs\ml-windows.yaml
+
+listen_host: 127.0.0.1
+
+# protect-llm: OCR workers are admitted only when their declared budgets fit.
+resource_policy: protect-llm
+
+resources:
+  ram_headroom_mb: 1024
+  vram_headroom_mb: 1024
+  protected_llm_vram_mb: 1024
+  gpu_probe: off
+
+shutdown_grace_seconds: 10
+
+ocr:
+  enabled: true
+  model_id: pp-ocrv5-mobile-en
+  engine: fake       # fake | tesseract
+  device: cpu
+  model_dir: ./models/ocr/pp-ocrv5-mobile-en
+  # No host resource probe on Windows; declare zero so admission is a no-op.
+  expected_ram_mb: 0
+  expected_vram_mb: 0
+  concurrency: 2
+  port: 8091
+  max_upload_mb: 10
+  startup_timeout_seconds: 60

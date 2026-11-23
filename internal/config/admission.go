@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/dikshaWagh/meridian/internal/balancer"
@@ -68,33 +67,17 @@ func AdmitReplicas(fps []Footprint, availableBytes int64, headroomMB int) error 
 		availableBytes>>20, headroomMB, max(budget, 0)>>20, len(fps), strings.Join(over, ", "))
 }
 
-// ReadMemAvailable returns MemAvailable from /proc/meminfo in bytes. Each node
+// ReadMemAvailable returns available physical memory in bytes. Each node
 // reads its own value; the leader's value says nothing about a worker.
 func ReadMemAvailable() (int64, error) {
-	return readMeminfo("MemAvailable:")
+	_, available, err := systemMemory()
+	return available, err
 }
 
-// ReadMemTotal returns MemTotal from /proc/meminfo in bytes.
+// ReadMemTotal returns total physical memory in bytes.
 func ReadMemTotal() (int64, error) {
-	return readMeminfo("MemTotal:")
-}
-
-func readMeminfo(key string) (int64, error) {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == key {
-			kb, err := strconv.ParseInt(fields[1], 10, 64)
-			if err != nil {
-				return 0, err
-			}
-			return kb << 10, nil
-		}
-	}
-	return 0, fmt.Errorf("%s not found in /proc/meminfo", strings.TrimSuffix(key, ":"))
+	total, _, err := systemMemory()
+	return total, err
 }
 
 // CheckLocalMemory runs the admission check for this node's replicas. It is

@@ -76,7 +76,7 @@ func ListenBroadcast(ctx context.Context) (net.PacketConn, error) {
 		Control: func(network, address string, c syscall.RawConn) error {
 			var serr error
 			if err := c.Control(func(fd uintptr) {
-				serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+				serr = setBroadcast(fd)
 			}); err != nil {
 				return err
 			}
