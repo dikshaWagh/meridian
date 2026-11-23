@@ -15,6 +15,7 @@ import (
 	"github.com/dikshaWagh/meridian/internal/api"
 	"github.com/dikshaWagh/meridian/internal/balancer"
 	"github.com/dikshaWagh/meridian/internal/control"
+	"github.com/dikshaWagh/meridian/internal/metrics"
 	"github.com/dikshaWagh/meridian/internal/ml"
 	"github.com/dikshaWagh/meridian/internal/registry"
 	"github.com/dikshaWagh/meridian/internal/tokens"
@@ -38,10 +39,15 @@ type gateway struct {
 	secret   []byte
 	leaderID string
 	now      func() time.Time
+	admin    *admin
+	hub      *hub
 }
 
-func newGateway(reg registry.Registry, router *balancer.ClusterRouter, secret []byte, leaderID string) *gateway {
-	return &gateway{reg: reg, router: router, secret: secret, leaderID: leaderID, now: time.Now}
+func newGateway(reg registry.Registry, router *balancer.ClusterRouter, secret []byte, leaderID, adminToken string) *gateway {
+	return &gateway{
+		reg: reg, router: router, secret: secret, leaderID: leaderID,
+		now: time.Now, admin: newAdmin(adminToken), hub: newHub(),
+	}
 }
 
 // handler returns the leader's API. The caller adds CORS and the UI.
@@ -57,8 +63,13 @@ func (g *gateway) handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", g.handleModels)
 	mux.HandleFunc("GET /v1/catalog", g.handleCatalog)
 	mux.HandleFunc("GET /policies", g.handlePolicies)
-	mux.HandleFunc("PUT /v1/policies/default", g.handleSetDefault)
+	mux.HandleFunc("PUT /v1/policies/default", g.admin.require(g.handleSetDefault))
 	mux.HandleFunc("POST /v1/chat/completions", g.handleChat)
+	mux.HandleFunc("GET /v1/admin/session", g.admin.require(func(w http.ResponseWriter, r *http.Request) {
+		api.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+	mux.HandleFunc("GET /v1/admin/cluster", g.admin.require(g.handleAdminCluster))
+	mux.HandleFunc("GET /v1/admin/events", g.admin.require(g.handleAdminEvents))
 	// The cluster does not run OCR yet, so the ML endpoints answer "disabled"
 	// instead of 404.
 	ml.RegisterFunc(mux, func() *ml.Service { return nil })
@@ -71,6 +82,8 @@ type routeError struct {
 	msg    string
 }
 
+// handleChat routes one request with the system routing policy. Clients
+// cannot choose a policy; only an admin can change the system policy.
 func (g *gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChatBody))
 	if err != nil {
@@ -86,16 +99,13 @@ func (g *gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "invalid_request", "model is required")
 		return
 	}
-	policy, err := g.router.Resolve(strings.TrimSpace(r.Header.Get("X-Meridian-Routing-Policy")))
-	if err != nil {
-		api.WriteError(w, http.StatusBadRequest, "unknown_routing_policy", err.Error())
-		return
-	}
 	if len(g.reg.ReplicasForModel(req.Model)) == 0 {
 		api.WriteError(w, http.StatusNotFound, "model_not_found", "unknown model "+strconv.Quote(req.Model))
 		return
 	}
 
+	policy := g.router.Default()
+	requestID := metrics.NewRequestID()
 	est := tokens.ForRequest(req)
 	route := balancer.RouteRequest{InputTokens: est.Input, OutputTokens: est.Output}
 	tried := map[string]bool{}
@@ -110,15 +120,28 @@ func (g *gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		ev := RouteEvent{Kind: "route", RequestID: requestID, Model: req.Model, Policy: policy,
+			NodeID: rep.NodeID, ReplicaID: rep.ReplicaID, Attempt: attempt + 1}
+		ev.Phase = "routing"
+		g.publish(ev)
 		if g.forward(w, r, rep, raw, policy, failover) {
 			g.reg.Release(rep.ReplicaID, true)
+			ev.Phase = "done"
+			g.publish(ev)
 			return
 		}
 		g.reg.Release(rep.ReplicaID, false)
 		tried[rep.ReplicaID] = true
 		failover = rep.ReplicaID
+		ev.Phase = "retry"
+		g.publish(ev)
 	}
 	api.WriteError(w, http.StatusBadGateway, "upstream_error", "every attempt to reach a replica failed")
+}
+
+func (g *gateway) publish(e RouteEvent) {
+	e.At = formatTime(g.now())
+	g.hub.publish(e)
 }
 
 // choose selects a replica and reserves a slot on it. The caller releases the
@@ -216,14 +239,10 @@ func (g *gateway) forward(w http.ResponseWriter, r *http.Request, rep registry.R
 func (g *gateway) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 	out := api.StatusResponse{Workers: []api.WorkerStatus{}}
 	for _, rep := range g.reg.Replicas() {
-		port := 0
-		if u, err := url.Parse(rep.Endpoint); err == nil {
-			port, _ = strconv.Atoi(u.Port())
-		}
+		// Regular users see no addresses or process IDs; those are admin-only.
 		out.Workers = append(out.Workers, api.WorkerStatus{
 			ID:                rep.ReplicaID,
 			Model:             rep.Model,
-			Port:              port,
 			State:             string(rep.State),
 			Healthy:           rep.Healthy,
 			InFlight:          rep.InFlight,

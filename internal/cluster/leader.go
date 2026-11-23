@@ -129,7 +129,7 @@ func RunLeader(cfg *config.ServeConfig) error {
 		},
 	})
 
-	srv := &http.Server{Handler: leaderHandler(reg, router, secret, nodeID), ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Handler: leaderHandler(reg, router, secret, nodeID, cl.AdminToken), ReadHeaderTimeout: 5 * time.Second}
 	errc := make(chan error, 1)
 	var wg sync.WaitGroup
 	run := func(f func() error) {
@@ -174,6 +174,14 @@ func RunLeader(cfg *config.ServeConfig) error {
 	return runErr
 }
 
+func ramTotalMB() int64 {
+	total, err := config.ReadMemTotal()
+	if err != nil {
+		return 0
+	}
+	return total >> 20
+}
+
 func localNode(nodeID, advertise string, httpPort int, now time.Time) registry.NodeRecord {
 	return registry.NodeRecord{
 		NodeID:        nodeID,
@@ -182,14 +190,14 @@ func localNode(nodeID, advertise string, httpPort int, now time.Time) registry.N
 		State:         registry.NodeOnline,
 		LastHeartbeat: now,
 		RegisteredAt:  now,
-		Hardware:      registry.Hardware{CPUCores: runtime.NumCPU()},
+		Hardware:      registry.Hardware{CPUCores: runtime.NumCPU(), RAMTotalMB: ramTotalMB()},
 	}
 }
 
 // leaderHandler is the public API: the cluster gateway behind CORS, with the
 // embedded web UI served for every other path.
-func leaderHandler(reg registry.Registry, router *balancer.ClusterRouter, secret []byte, leaderID string) http.Handler {
-	gw := newGateway(reg, router, secret, leaderID)
+func leaderHandler(reg registry.Registry, router *balancer.ClusterRouter, secret []byte, leaderID, adminToken string) http.Handler {
+	gw := newGateway(reg, router, secret, leaderID, adminToken)
 	return webui.Handler(balancer.WithCORS(gw.handler()))
 }
 

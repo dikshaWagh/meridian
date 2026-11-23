@@ -196,6 +196,7 @@ func (l *Leader) register(conn net.Conn, line []byte) (string, bool) {
 			ContextWindow: r.ContextWindow,
 			MaxConcurrent: r.MaxConcurrent,
 			State:         registry.ReplicaState(r.State),
+			PID:           r.PID,
 			LastCheck:     now,
 		})
 	}
@@ -383,6 +384,7 @@ func hardwareOf(h HardwareInfo) registry.Hardware {
 
 func replicaStats(r ReplicaStatus, now time.Time) registry.ReplicaStats {
 	return registry.ReplicaStats{
+		PID:               r.PID,
 		QueueDepth:        r.QueueDepth,
 		Served:            r.Served,
 		EstTokensInFlight: r.EstTokensInFlight,

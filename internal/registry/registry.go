@@ -203,6 +203,7 @@ func (m *memRegistry) UpdateReplicaStats(replicaID string, stats ReplicaStats) e
 	if !ok {
 		return ErrNotFound
 	}
+	r.PID = stats.PID
 	r.QueueDepth = stats.QueueDepth
 	r.Served = stats.Served
 	r.EstTokensInFlight = stats.EstTokensInFlight

@@ -1,30 +1,32 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { errorMessage, fetchCatalog, sendChat } from './api'
+import { AdminPanel } from './components/AdminPanel'
 import { ChatPanel } from './components/ChatPanel'
-import { ClusterPanel } from './components/ClusterPanel'
-import { OCRPanel } from './components/OCRPanel'
+import { Landing, type Role } from './components/Landing'
+import { ModelsPanel } from './components/ModelsPanel'
 import { uid, useConversations } from './hooks/useConversations'
 import { usePoll } from './hooks/usePoll'
 import type { ChatMessage, ChatTurn, Conversation } from './types'
 
-type Tab = 'chat' | 'ocr'
+type AdminTab = 'control' | 'chat'
 
 interface Prefs {
   model: string
-  policy: string
   stream: boolean
 }
 
 const PREFS_KEY = 'meridian.ui.prefs.v1'
+const ROLE_KEY = 'meridian.role'
+const TOKEN_KEY = 'meridian.adminToken'
 
 function loadPrefs(): Prefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY)
-    if (raw) return { model: '', policy: '', stream: true, ...(JSON.parse(raw) as Partial<Prefs>) }
+    if (raw) return { model: '', stream: true, ...(JSON.parse(raw) as Partial<Prefs>) }
   } catch {
     // Corrupt preferences fall back to defaults.
   }
-  return { model: '', policy: '', stream: true }
+  return { model: '', stream: true }
 }
 
 function titleFrom(text: string): string {
@@ -32,10 +34,62 @@ function titleFrom(text: string): string {
   return clean.length <= 46 ? clean : `${clean.slice(0, 46).trimEnd()}…`
 }
 
+interface Session {
+  role: Role | null
+  token: string
+}
+
+function loadSession(): Session {
+  const role = sessionStorage.getItem(ROLE_KEY)
+  const token = sessionStorage.getItem(TOKEN_KEY) ?? ''
+  if (role === 'user') return { role: 'user', token: '' }
+  if (role === 'admin' && token) return { role: 'admin', token }
+  return { role: null, token: '' }
+}
+
 export default function App() {
+  const [session, setSession] = useState<Session>(loadSession)
+  const [adminTab, setAdminTab] = useState<AdminTab>('control')
+
+  const signIn = (role: Role, token?: string) => {
+    sessionStorage.setItem(ROLE_KEY, role)
+    if (role === 'admin' && token) sessionStorage.setItem(TOKEN_KEY, token)
+    else sessionStorage.removeItem(TOKEN_KEY)
+    setSession({ role, token: token ?? '' })
+    setAdminTab('control')
+  }
+
+  const signOut = useCallback(() => {
+    sessionStorage.removeItem(ROLE_KEY)
+    sessionStorage.removeItem(TOKEN_KEY)
+    setSession({ role: null, token: '' })
+  }, [])
+
+  if (session.role === null) {
+    return <Landing onPick={signIn} />
+  }
+  return (
+    <Console
+      role={session.role}
+      token={session.token}
+      adminTab={adminTab}
+      onAdminTab={setAdminTab}
+      onSignOut={signOut}
+    />
+  )
+}
+
+interface ConsoleProps {
+  role: Role
+  token: string
+  adminTab: AdminTab
+  onAdminTab: (t: AdminTab) => void
+  onSignOut: () => void
+}
+
+function Console({ role, token, adminTab, onAdminTab, onSignOut }: ConsoleProps) {
   const catalog = usePoll(fetchCatalog, 5000)
   const convs = useConversations()
-  const [tab, setTab] = useState<Tab>('chat')
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs)
   const [busy, setBusy] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -55,9 +109,7 @@ export default function App() {
     models.find((m) => m.healthy)?.id ??
     models[0]?.id ??
     ''
-  // The policy the next request will use: the chat's own choice if set,
-  // otherwise the server default.
-  const policyName = prefs.policy || catalog.data?.default_routing_policy || ''
+  const systemPolicy = catalog.data?.default_routing_policy ?? ''
   const active: Conversation | null = convs.list.find((c) => c.id === convs.activeId) ?? null
 
   const send = async (text: string) => {
@@ -93,7 +145,6 @@ export default function App() {
         model,
         messages: history,
         stream: prefs.stream,
-        policy: prefs.policy || undefined,
         signal: controller.signal,
         onDelta: (delta) => patchReply((m) => ({ ...m, content: m.content + delta })),
       })
@@ -107,6 +158,9 @@ export default function App() {
     }
   }
 
+  const isAdmin = role === 'admin'
+  const showChat = !isAdmin || adminTab === 'chat'
+
   return (
     <div className="app">
       <header className="topbar">
@@ -114,32 +168,33 @@ export default function App() {
           <BrandMark />
           <span>Meridian</span>
         </div>
-        <nav className="tabs">
-          <button className={tab === 'chat' ? 'tab active' : 'tab'} onClick={() => setTab('chat')}>
-            Chat
-          </button>
-          <button className={tab === 'ocr' ? 'tab active' : 'tab'} onClick={() => setTab('ocr')}>
-            Document OCR
-          </button>
-        </nav>
+        {isAdmin && (
+          <nav className="tabs">
+            <button className={adminTab === 'control' ? 'tab active' : 'tab'} onClick={() => onAdminTab('control')}>
+              Control panel
+            </button>
+            <button className={adminTab === 'chat' ? 'tab active' : 'tab'} onClick={() => onAdminTab('chat')}>
+              Chat
+            </button>
+          </nav>
+        )}
         <div className="topbar-right">
-          <span
-            className="badge badge-policy"
-            title={prefs.policy ? 'Routing policy selected for chat requests' : 'Server default routing policy'}
-          >
-            routing: {policyName || '—'}
-            {prefs.policy ? ' (chat)' : ''}
-          </span>
+          <span className={isAdmin ? 'badge badge-admin' : 'badge'}>{isAdmin ? 'Admin' : 'User'}</span>
           {catalog.error ? (
-            <span className="badge badge-warn" title={catalog.error}>gateway unreachable</span>
+            <span className="badge badge-warn" title={catalog.error}>leader unreachable</span>
           ) : (
             <span className="badge badge-healthy">connected</span>
           )}
+          <button className="btn btn-ghost" onClick={onSignOut}>Switch role</button>
         </div>
       </header>
 
-      <div className={tab === 'chat' ? 'layout' : 'layout layout-no-sidebar'}>
-        {tab === 'chat' && (
+      {isAdmin && adminTab === 'control' ? (
+        <div className="page">
+          <AdminPanel token={token} onExpired={onSignOut} />
+        </div>
+      ) : (
+        <div className="layout">
           <aside className="sidebar">
             <button className="btn btn-primary full" onClick={() => convs.create()}>
               New chat
@@ -159,32 +214,26 @@ export default function App() {
               {convs.list.length === 0 && <li className="muted small pad">No chats yet.</li>}
             </ul>
           </aside>
-        )}
 
-        <main className="main">
-          {tab === 'chat' ? (
-            <ChatPanel
-              conversation={active}
-              models={models}
-              policies={catalog.data?.routing_policies ?? []}
-              defaultPolicy={catalog.data?.default_routing_policy ?? ''}
-              model={model}
-              policy={prefs.policy}
-              stream={prefs.stream}
-              busy={busy}
-              onModel={(id) => setPrefs((p) => ({ ...p, model: id }))}
-              onPolicy={(name) => setPrefs((p) => ({ ...p, policy: name }))}
-              onStream={(on) => setPrefs((p) => ({ ...p, stream: on }))}
-              onSend={(text) => void send(text)}
-              onStop={() => abortRef.current?.abort()}
-            />
-          ) : (
-            <OCRPanel />
-          )}
-        </main>
+          <main className="main">
+            {showChat && (
+              <ChatPanel
+                conversation={active}
+                models={models}
+                model={model}
+                stream={prefs.stream}
+                busy={busy}
+                onModel={(id) => setPrefs((p) => ({ ...p, model: id }))}
+                onStream={(on) => setPrefs((p) => ({ ...p, stream: on }))}
+                onSend={(text) => void send(text)}
+                onStop={() => abortRef.current?.abort()}
+              />
+            )}
+          </main>
 
-        <ClusterPanel models={models} policy={policyName} />
-      </div>
+          <ModelsPanel models={models} policy={systemPolicy} />
+        </div>
+      )}
     </div>
   )
 }

@@ -21,6 +21,7 @@ import (
 const (
 	testSecret = "test-secret"
 	leaderID   = "leader-01"
+	testAdmin  = "admin-token-for-tests"
 	remoteID   = "node-b"
 )
 
@@ -88,7 +89,7 @@ func newFixture(t *testing.T) *fixture {
 		State: registry.NodeOnline, LastHeartbeat: time.Now()}, nil); err != nil {
 		t.Fatal(err)
 	}
-	gw := httptest.NewServer(newGateway(reg, router, []byte(testSecret), leaderID).handler())
+	gw := httptest.NewServer(newGateway(reg, router, []byte(testSecret), leaderID, testAdmin).handler())
 	t.Cleanup(gw.Close)
 	return &fixture{t: t, reg: reg, gateway: gw}
 }
@@ -250,7 +251,6 @@ func TestErrorResponses(t *testing.T) {
 	}{
 		{"unknown model", chatBody("nope", "hi", false), nil, 404, "model_not_found"},
 		{"no ready replica", chatBody("m", "hi", false), nil, 503, "no_healthy_worker"},
-		{"unknown policy", chatBody("m", "hi", false), map[string]string{"X-Meridian-Routing-Policy": "nope"}, 400, "unknown_routing_policy"},
 		{"missing model", []byte(`{"messages":[]}`), nil, 400, "invalid_request"},
 	}
 	for _, c := range cases {
@@ -346,5 +346,151 @@ func TestCatalogAndModelsReflectRegistry(t *testing.T) {
 	resp.Body.Close()
 	if len(cat.LLM) != 1 || cat.LLM[0].ID != "m" || cat.LLM[0].HealthyWorkers != 1 || cat.DefaultRoutingPolicy != "round-robin" {
 		t.Fatalf("catalog = %+v", cat)
+	}
+}
+
+func (fx *fixture) do(method, path string, body []byte, token string) *http.Response {
+	fx.t.Helper()
+	req, _ := http.NewRequest(method, fx.gateway.URL+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	return resp
+}
+
+func TestOnlyAdminCanChangeRoutingPolicy(t *testing.T) {
+	fx := newFixture(t)
+	fx.addLocal("m-1", "m", newFakeLlama(t), registry.ReplicaReady)
+	set := []byte(`{"name":"least-connections"}`)
+
+	for _, token := range []string{"", "wrong-token-value-xx"} {
+		resp := fx.do(http.MethodPut, "/v1/policies/default", set, token)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("token %q: status %d, want 401", token, resp.StatusCode)
+		}
+	}
+
+	resp := fx.do(http.MethodPut, "/v1/policies/default", set, testAdmin)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin set policy: status %d", resp.StatusCode)
+	}
+	resp = fx.do(http.MethodGet, "/policies", nil, "")
+	var list struct {
+		Default string `json:"default"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if list.Default != "least-connections" {
+		t.Fatalf("system policy = %q, want least-connections", list.Default)
+	}
+}
+
+func TestClientPolicyHeaderIsIgnored(t *testing.T) {
+	fx := newFixture(t)
+	fx.addLocal("m-1", "m", newFakeLlama(t), registry.ReplicaReady)
+	resp := fx.chat(chatBody("m", "hi", false), map[string]string{"X-Meridian-Routing-Policy": "token-aware"})
+	readAll(t, resp.Body)
+	resp.Body.Close()
+	if got := resp.Header.Get("X-Meridian-Routing-Policy"); got != "round-robin" {
+		t.Fatalf("policy applied = %q; the system policy must win over the client header", got)
+	}
+}
+
+func TestAdminEndpointsRequireTokenAndDisabledWithoutOne(t *testing.T) {
+	fx := newFixture(t)
+	for _, path := range []string{"/v1/admin/cluster", "/v1/admin/session"} {
+		resp := fx.do(http.MethodGet, path, nil, "")
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s without token: %d", path, resp.StatusCode)
+		}
+	}
+
+	// A gateway without an admin token refuses admin access outright.
+	router, _ := balancer.NewClusterRouter("round-robin")
+	off := httptest.NewServer(newGateway(registry.New(), router, []byte(testSecret), leaderID, "").handler())
+	defer off.Close()
+	resp, _ := http.Get(off.URL + "/v1/admin/cluster")
+	body := readAll(t, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(body, "admin_disabled") {
+		t.Fatalf("disabled admin: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestAdminClusterShowsPIDsAndAddresses(t *testing.T) {
+	fx := newFixture(t)
+	llama := newFakeLlama(t)
+	fx.addLocal("m-1", "m", llama, registry.ReplicaReady)
+	fx.reg.UpdateReplicaStats("m-1", registry.ReplicaStats{PID: 4242})
+
+	resp := fx.do(http.MethodGet, "/v1/admin/cluster", nil, testAdmin)
+	var view adminCluster
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(view.Nodes) != 1 || view.Nodes[0].Address == "" {
+		t.Fatalf("nodes = %+v", view.Nodes)
+	}
+	if got := view.Nodes[0].Replicas[0].PID; got != 4242 {
+		t.Fatalf("pid = %d, want 4242", got)
+	}
+}
+
+func TestUserStatusHasNoAddressesOrPIDs(t *testing.T) {
+	fx := newFixture(t)
+	fx.addLocal("m-1", "m", newFakeLlama(t), registry.ReplicaReady)
+	fx.reg.UpdateReplicaStats("m-1", registry.ReplicaStats{PID: 4242})
+	resp := fx.do(http.MethodGet, "/status", nil, "")
+	body := readAll(t, resp.Body)
+	resp.Body.Close()
+	if strings.Contains(body, "4242") || strings.Contains(body, `"port":8`) || strings.Contains(body, "127.0.0.1") {
+		t.Fatalf("user status leaks addresses or PIDs: %s", body)
+	}
+}
+
+func TestAdminEventStreamShowsRoutingPath(t *testing.T) {
+	fx := newFixture(t)
+	fx.addLocal("m-1", "m", newFakeLlama(t), registry.ReplicaReady)
+
+	req, _ := http.NewRequest(http.MethodGet, fx.gateway.URL+"/v1/admin/events", nil)
+	req.Header.Set("Authorization", "Bearer "+testAdmin)
+	stream, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	events := make(chan string, 8)
+	go func() {
+		sc := bufio.NewScanner(stream.Body)
+		for sc.Scan() {
+			if strings.HasPrefix(sc.Text(), "data: ") {
+				events <- strings.TrimPrefix(sc.Text(), "data: ")
+			}
+		}
+	}()
+
+	resp := fx.chat(chatBody("m", "hi", false), nil)
+	readAll(t, resp.Body)
+	resp.Body.Close()
+
+	want := []string{`"phase":"routing"`, `"phase":"done"`}
+	for _, w := range want {
+		select {
+		case line := <-events:
+			if !strings.Contains(line, w) || !strings.Contains(line, `"replica_id":"m-1"`) || !strings.Contains(line, `"node_id":"leader-01"`) {
+				t.Fatalf("event %s does not match %s", line, w)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("no %s event", w)
+		}
 	}
 }

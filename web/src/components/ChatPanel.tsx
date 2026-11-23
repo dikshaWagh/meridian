@@ -1,24 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
-import type { CatalogModel, ChatMessage, Conversation, RoutingPolicy } from '../types'
+import type { CatalogModel, ChatMessage, Conversation } from '../types'
 
 interface Props {
   conversation: Conversation | null
   models: CatalogModel[]
-  policies: RoutingPolicy[]
-  defaultPolicy: string
   model: string
-  policy: string
   stream: boolean
   busy: boolean
   onModel: (id: string) => void
-  onPolicy: (name: string) => void
   onStream: (on: boolean) => void
   onSend: (text: string) => void
   onStop: () => void
 }
 
 export function ChatPanel(props: Props) {
-  const { conversation, models, policies, defaultPolicy, model, policy, stream, busy } = props
+  const { conversation, models, model, stream, busy } = props
   const [draft, setDraft] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
   const messages = conversation?.messages ?? []
@@ -61,17 +57,6 @@ export function ChatPanel(props: Props) {
               {models.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.id} · {m.healthy_workers ?? 0}/{m.workers ?? 0} up
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="control">
-            <span>Routing</span>
-            <select value={policy} onChange={(e) => props.onPolicy(e.target.value)} disabled={busy}>
-              <option value="">Server default ({defaultPolicy || '—'})</option>
-              {policies.map((p) => (
-                <option key={p.name} value={p.name} title={p.description}>
-                  {p.name}
                 </option>
               ))}
             </select>

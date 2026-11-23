@@ -29,6 +29,11 @@ const (
 // SecretEnv is the environment variable used when --cluster-secret is unset.
 const SecretEnv = "MERIDIAN_CLUSTER_SECRET"
 
+// AdminTokenEnv is the environment variable used when --admin-token is unset.
+const AdminTokenEnv = "MERIDIAN_ADMIN_TOKEN"
+
+const minAdminTokenLen = 12
+
 const (
 	defaultDiscoveryPort    = 9999
 	defaultControlPort      = 9000
@@ -45,9 +50,12 @@ const (
 
 // ClusterConfig holds the settings used only by --leader and --worker.
 type ClusterConfig struct {
-	NodeID              string
-	StateDir            string
-	Secret              string
+	NodeID   string
+	StateDir string
+	Secret   string
+	// AdminToken unlocks the admin console and system routing policy. Empty
+	// disables admin access entirely.
+	AdminToken          string
 	DiscoveryPort       int
 	ControlPort         int
 	AdvertiseIP         string
@@ -110,6 +118,7 @@ var clusterOnlyFlags = map[string]Role{
 	"node-id":               "",
 	"state-dir":             "",
 	"cluster-secret":        "",
+	"admin-token":           "",
 	"discovery-port":        "",
 	"control-port":          "",
 	"advertise-ip":          "",
@@ -143,6 +152,7 @@ func Parse(args []string, lookupEnv func(string) (string, bool)) (*ServeConfig, 
 	fs.IntVar(&o.Port, "port", 8080, "balancer port")
 	fs.StringVar(&c.AdvertiseIP, "advertise-ip", "", "IP other nodes use to reach this node (default: first non-loopback IPv4)")
 	fs.StringVar(&c.LeaderAddr, "leader-addr", "", "host:port of the leader control plane; skips UDP discovery (worker only)")
+	fs.StringVar(&c.AdminToken, "admin-token", "", "token for the admin console and routing policy changes (default: $"+AdminTokenEnv+"); never logged")
 	fs.DurationVar(&c.DiscoveryTimeout, "discovery-timeout", defaultDiscoveryTimeout, "give up one discovery round after this long (worker only)")
 	fs.DurationVar(&c.HeartbeatInterval, "heartbeat-interval", defaultHeartbeat, "how often the worker sends HEARTBEAT (worker only)")
 	fs.DurationVar(&c.NodeTimeout, "node-timeout", defaultNodeTimeout, "no heartbeat for this long marks a node offline (leader only)")
@@ -231,6 +241,11 @@ func Parse(args []string, lookupEnv func(string) (string, bool)) (*ServeConfig, 
 				cfg.Cluster.Secret = v
 			}
 		}
+		if cfg.Cluster.AdminToken == "" {
+			if v, ok := lookupEnv(AdminTokenEnv); ok {
+				cfg.Cluster.AdminToken = v
+			}
+		}
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -248,6 +263,9 @@ func (c *ServeConfig) validate() error {
 	cl := c.Cluster
 	if strings.TrimSpace(cl.Secret) == "" {
 		return fmt.Errorf("cluster secret is required in cluster mode: pass --cluster-secret or set %s", SecretEnv)
+	}
+	if cl.AdminToken != "" && len(cl.AdminToken) < minAdminTokenLen {
+		return fmt.Errorf("--admin-token must be at least %d characters", minAdminTokenLen)
 	}
 	if cl.NodeID != "" {
 		if err := validateNodeID(cl.NodeID); err != nil {
@@ -364,8 +382,13 @@ func (c *ServeConfig) Describe() []string {
 	if cl.Secret != "" {
 		secret = "set (redacted)"
 	}
+	admin := "unset (policy changes disabled)"
+	if cl.AdminToken != "" {
+		admin = "set (redacted)"
+	}
 	lines := []string{
 		fmt.Sprintf("role: %s", c.Role),
+		fmt.Sprintf("admin-token: %s", admin),
 		fmt.Sprintf("node-id: %s", valueOrAuto(cl.NodeID)),
 		fmt.Sprintf("state-dir: %s", cl.StateDir),
 		fmt.Sprintf("cluster-secret: %s", secret),

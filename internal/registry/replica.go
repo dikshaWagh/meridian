@@ -29,6 +29,7 @@ type ReplicaRecord struct {
 	MaxConcurrent     int
 	State             ReplicaState
 	LastState         ReplicaState
+	PID               int
 	Healthy           bool
 	InFlight          int64
 	QueueDepth        int64
@@ -41,6 +42,7 @@ type ReplicaRecord struct {
 
 // ReplicaStats is the per-replica counters reported with heartbeats.
 type ReplicaStats struct {
+	PID               int
 	QueueDepth        int64
 	Served            int64
 	EstTokensInFlight int64

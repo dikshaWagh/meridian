@@ -128,3 +128,53 @@ export interface Conversation {
   updatedAt: number
   messages: ChatMessage[]
 }
+
+// Admin-only shapes. They include IP addresses and process IDs, so they are
+// fetched only with the admin token and never shown to regular users.
+export interface AdminReplica {
+  id: string
+  model: string
+  instance: number
+  pid: number
+  state: string
+  last_state?: string
+  healthy: boolean
+  in_flight: number
+  served: number
+  tok_per_sec: number
+  endpoint: string
+  last_error: string
+}
+
+export interface AdminNode {
+  node_id: string
+  address: string
+  http_port: number
+  local: boolean
+  state: string
+  cpu_cores: number
+  cpu_percent: number
+  ram_used_mb: number
+  ram_total_mb: number
+  replicas: AdminReplica[]
+}
+
+export interface AdminCluster {
+  leader_id: string
+  policy: string
+  policies: RoutingPolicy[]
+  nodes: AdminNode[]
+}
+
+// RouteEvent is one step of a request's path, streamed to the admin console.
+export interface RouteEvent {
+  kind: string
+  at: string
+  request_id: string
+  model: string
+  policy: string
+  node_id: string
+  replica_id: string
+  phase: 'routing' | 'done' | 'retry' | 'failed'
+  attempt: number
+}

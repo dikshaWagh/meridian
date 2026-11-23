@@ -355,3 +355,25 @@ func TestClusterReplicaPortBaseReachesBalancer(t *testing.T) {
 		t.Fatalf("standalone ReplicaPortBase = %d, want 0 (legacy 8081 range)", standalone.Options.ReplicaPortBase)
 	}
 }
+
+func TestAdminTokenValidationAndRedaction(t *testing.T) {
+	mustFail(t, clusterArgs("--admin-token", "short"), noEnv, "at least 12 characters")
+	cfg := mustParse(t, clusterArgs("--admin-token", "a-long-admin-token"), noEnv)
+	out := strings.Join(cfg.Describe(), "\n")
+	if strings.Contains(out, "a-long-admin-token") || !strings.Contains(out, "admin-token: set (redacted)") {
+		t.Fatalf("admin token not redacted:\n%s", out)
+	}
+	fromEnv := mustParse(t, clusterArgs(), func(k string) (string, bool) {
+		if k == AdminTokenEnv {
+			return "env-admin-token-value", true
+		}
+		return "", false
+	})
+	if fromEnv.Cluster.AdminToken != "env-admin-token-value" {
+		t.Fatalf("admin token from env = %q", fromEnv.Cluster.AdminToken)
+	}
+	unset := mustParse(t, clusterArgs(), noEnv)
+	if !strings.Contains(strings.Join(unset.Describe(), "\n"), "admin-token: unset") {
+		t.Fatal("unset admin token should be reported as unset")
+	}
+}

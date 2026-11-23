@@ -37,6 +37,7 @@ type ReplicaInfo struct {
 	ContextWindow int    `json:"context_window"`
 	MaxConcurrent int    `json:"max_concurrent"`
 	State         string `json:"state"`
+	PID           int    `json:"pid"`
 }
 
 // RegisterAckPayload is the REGISTER_ACK body.
@@ -67,6 +68,7 @@ type ReplicaStatus struct {
 	EstTokensInFlight int64   `json:"est_tokens_in_flight"`
 	TokPerSec         float64 `json:"tok_per_sec"`
 	LastError         string  `json:"last_error"`
+	PID               int     `json:"pid"`
 }
 
 // DeregisterPayload is the DEREGISTER body.
@@ -138,6 +140,9 @@ func (r *ReplicaInfo) validate() error {
 	if err := ValidEndpoint(r.Endpoint); err != nil {
 		return fmt.Errorf("endpoint: %v", err)
 	}
+	if r.PID < 0 {
+		return fmt.Errorf("pid must not be negative")
+	}
 	if r.ContextWindow < 0 || r.MaxConcurrent < 0 {
 		return fmt.Errorf("context_window and max_concurrent must not be negative")
 	}
@@ -166,6 +171,9 @@ func (r *ReplicaStatus) validate() error {
 	}
 	if !ValidReplicaState(r.State) {
 		return fmt.Errorf("state %q is not a known replica state", r.State)
+	}
+	if r.PID < 0 {
+		return fmt.Errorf("pid must not be negative")
 	}
 	if r.InFlight < 0 || r.QueueDepth < 0 || r.Served < 0 || r.EstTokensInFlight < 0 || r.TokPerSec < 0 {
 		return fmt.Errorf("counters must not be negative")
