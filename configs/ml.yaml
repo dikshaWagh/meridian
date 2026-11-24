@@ -1,13 +1,7 @@
-# Meridian OCR serving configuration
+# Meridian LLM serving configuration
 #
-# The default configuration uses the deterministic "fake" engine so the OCR
-# subsystem can be exercised on any machine without model weights:
-#
-#   ./bin/meridian-server serve --enable-llm=false --enable-ml=true \
+# Run with: ./bin/meridian-server serve --enable-llm=true \
 #       --ml-config ./configs/ml.yaml
-#
-# For real OCR switch `engine` to `tesseract`, which shells out to the
-# tesseract binary on PATH. See configs/laptop-real.yaml.
 
 listen_host: 127.0.0.1
 
@@ -21,20 +15,5 @@ resources:
   protected_llm_vram_mb: 1024
   gpu_probe: auto   # auto | off. Unknown VRAM is never treated as unlimited.
 
-# Grace period for draining in-flight OCR requests on shutdown, before SIGTERM.
+# Grace period for draining in-flight requests on shutdown, before SIGTERM.
 shutdown_grace_seconds: 10
-
-ocr:
-  enabled: true
-  model_id: pp-ocrv5-mobile-en
-  engine: fake       # fake | tesseract
-  device: cpu
-  model_dir: ./models/ocr/pp-ocrv5-mobile-en
-  # Declared peak budgets used for admission control (not inferred from file size).
-  # The fake engine needs little; a real tesseract worker typically declares 300.
-  expected_ram_mb: 256
-  expected_vram_mb: 0
-  concurrency: 2
-  port: 8091
-  max_upload_mb: 10
-  startup_timeout_seconds: 60

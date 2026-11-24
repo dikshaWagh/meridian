@@ -134,8 +134,8 @@ func (r *ReplicaInfo) validate() error {
 	if r.Instance < 1 {
 		return fmt.Errorf("instance must be at least 1")
 	}
-	if r.Kind != "llm" && r.Kind != "ocr" {
-		return fmt.Errorf("kind %q must be llm or ocr", r.Kind)
+	if r.Kind != "llm" {
+		return fmt.Errorf("kind %q must be llm", r.Kind)
 	}
 	if err := ValidEndpoint(r.Endpoint); err != nil {
 		return fmt.Errorf("endpoint: %v", err)

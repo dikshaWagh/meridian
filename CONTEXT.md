@@ -108,6 +108,10 @@ configs/
   laptop-real.yaml   real tesseract OCR
   cluster.yaml       [Phase 3] worker list for the fixed leader: id, model, host, port, local|remote.
                      First node listed is the leader.
+scripts/
+  install-nosudo.sh  install into ~/meridian on a box with no root/git/compiler (SSH only)
+  meridian-setup.sh  check/models/update/run for a normal machine
+  make-pendrive.sh   copy a handoff bundle to a USB stick
 docs/
   00-overview-and-roadmap.md     Product claim + phase order (read first)
   01-phase-0-trim-the-fat.md     Phase 0 deletions + acceptance
@@ -240,6 +244,11 @@ make build          # only after web/src edits
 ./bin/meridian-stress --addr http://127.0.0.1:8080 --concurrency 6 --conversations-per-model 20
 curl http://127.0.0.1:8080/status
 ```
+
+**No root, SSH-only box (Debian, no git/compiler):** build a static binary with
+`CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/meridian-server-static ./cmd/meridian-server`,
+copy it plus `scripts/install-nosudo.sh`, then run `install`, `models`, `run`. Everything lands in
+`~/meridian`; llama.cpp is downloaded and unpacked there too. Details: `docs/install-without-root.md`.
 
 **Known limitations (say upfront):** no auth/TLS (trusted LAN only), fixed leader is a single point of
 failure (manual restart, no election), no node-level heartbeat yet (§6.6), in-memory sessions,

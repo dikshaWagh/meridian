@@ -9,16 +9,3 @@ resources:
   gpu_probe: off
 
 shutdown_grace_seconds: 10
-
-ocr:
-  enabled: true
-  model_id: tesseract-eng
-  engine: tesseract
-  device: cpu
-  language: eng
-  expected_ram_mb: 300
-  expected_vram_mb: 0
-  concurrency: 1
-  port: 8091
-  max_upload_mb: 10
-  startup_timeout_seconds: 30

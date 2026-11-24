@@ -110,11 +110,15 @@ func RunLeader(cfg *config.ServeConfig) error {
 		Address:     cl.AdvertiseIP,
 		ControlPort: cl.ControlPort,
 	}
+	cpu := &cpuSampler{}
 	monitor := health.New(reg, health.Config{
 		LocalNodeID:       nodeID,
 		NodeTimeout:       cl.NodeTimeout,
 		HealthInterval:    cl.HealthInterval,
 		DiscoveryInterval: cl.DiscoveryInterval,
+		LocalStats: func() registry.NodeStats {
+			return registry.NodeStats{At: time.Now(), CPUPercent: cpu.sample(), RAMUsedMB: ramUsedMB()}
+		},
 		SyncLocal: func(t time.Time) {
 			for _, rec := range localReplicas(nodeID, replicas.Pool, cfg.Options, t) {
 				// The registry owns the leader's in-flight and served counts, so
@@ -180,6 +184,19 @@ func ramTotalMB() int64 {
 		return 0
 	}
 	return total >> 20
+}
+
+// ramUsedMB is total minus available, in MiB, for the local-node status row.
+func ramUsedMB() int64 {
+	total, err := config.ReadMemTotal()
+	if err != nil {
+		return 0
+	}
+	avail, err := config.ReadMemAvailable()
+	if err != nil || total <= avail {
+		return 0
+	}
+	return (total - avail) >> 20
 }
 
 func localNode(nodeID, advertise string, httpPort int, now time.Time) registry.NodeRecord {

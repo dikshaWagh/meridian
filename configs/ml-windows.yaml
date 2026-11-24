@@ -9,7 +9,7 @@
 
 listen_host: 127.0.0.1
 
-# protect-llm: OCR workers are admitted only when their declared budgets fit.
+# protect-llm: workers are admitted only when their declared budgets fit.
 resource_policy: protect-llm
 
 resources:
@@ -19,17 +19,3 @@ resources:
   gpu_probe: off
 
 shutdown_grace_seconds: 10
-
-ocr:
-  enabled: true
-  model_id: pp-ocrv5-mobile-en
-  engine: fake       # fake | tesseract
-  device: cpu
-  model_dir: ./models/ocr/pp-ocrv5-mobile-en
-  # No host resource probe on Windows; declare zero so admission is a no-op.
-  expected_ram_mb: 0
-  expected_vram_mb: 0
-  concurrency: 2
-  port: 8091
-  max_upload_mb: 10
-  startup_timeout_seconds: 60

@@ -16,7 +16,6 @@ import (
 	"github.com/dikshaWagh/meridian/internal/balancer"
 	"github.com/dikshaWagh/meridian/internal/control"
 	"github.com/dikshaWagh/meridian/internal/metrics"
-	"github.com/dikshaWagh/meridian/internal/ml"
 	"github.com/dikshaWagh/meridian/internal/registry"
 	"github.com/dikshaWagh/meridian/internal/tokens"
 )
@@ -70,9 +69,7 @@ func (g *gateway) handler() http.Handler {
 	}))
 	mux.HandleFunc("GET /v1/admin/cluster", g.admin.require(g.handleAdminCluster))
 	mux.HandleFunc("GET /v1/admin/events", g.admin.require(g.handleAdminEvents))
-	// The cluster does not run OCR yet, so the ML endpoints answer "disabled"
-	// instead of 404.
-	ml.RegisterFunc(mux, func() *ml.Service { return nil })
+	
 	return mux
 }
 
@@ -85,6 +82,7 @@ type routeError struct {
 // handleChat routes one request with the system routing policy. Clients
 // cannot choose a policy; only an admin can change the system policy.
 func (g *gateway) handleChat(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChatBody))
 	if err != nil {
 		api.WriteError(w, http.StatusBadRequest, "invalid_request", "could not read body (max 1 MiB)")
@@ -111,7 +109,7 @@ func (g *gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	failover := ""
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		rep, rerr := g.choose(req.Model, policy, route, tried)
+		rep, pred, rerr := g.choose(req.Model, policy, route, tried)
 		if rerr != nil {
 			if attempt == 0 {
 				api.WriteError(w, rerr.status, rerr.typ, rerr.msg)
@@ -124,7 +122,8 @@ func (g *gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 			NodeID: rep.NodeID, ReplicaID: rep.ReplicaID, Attempt: attempt + 1}
 		ev.Phase = "routing"
 		g.publish(ev)
-		if g.forward(w, r, rep, raw, policy, failover) {
+		queueMs := float64(time.Since(start).Microseconds()) / 1000
+		if g.forward(w, r, rep, raw, policy, failover, queueMs, pred) {
 			g.reg.Release(rep.ReplicaID, true)
 			ev.Phase = "done"
 			g.publish(ev)
@@ -145,8 +144,9 @@ func (g *gateway) publish(e RouteEvent) {
 }
 
 // choose selects a replica and reserves a slot on it. The caller releases the
-// slot when the request ends.
-func (g *gateway) choose(model, policy string, route balancer.RouteRequest, skip map[string]bool) (registry.ReplicaRecord, *routeError) {
+// slot when the request ends. The predicted value is the TW-LEL estimate in
+// milliseconds for the chosen replica, or -1 when the policy does not predict.
+func (g *gateway) choose(model, policy string, route balancer.RouteRequest, skip map[string]bool) (registry.ReplicaRecord, float64, *routeError) {
 	for try := 0; try < reserveRetries; try++ {
 		var eligible []registry.ReplicaRecord
 		for _, r := range g.reg.EligibleReplicas(model) {
@@ -155,7 +155,7 @@ func (g *gateway) choose(model, policy string, route balancer.RouteRequest, skip
 			}
 		}
 		if len(eligible) == 0 {
-			return registry.ReplicaRecord{}, &routeError{http.StatusServiceUnavailable, "no_healthy_worker",
+			return registry.ReplicaRecord{}, 0, &routeError{http.StatusServiceUnavailable, "no_healthy_worker",
 				"no healthy replica for model " + strconv.Quote(model)}
 		}
 
@@ -168,7 +168,7 @@ func (g *gateway) choose(model, policy string, route balancer.RouteRequest, skip
 			}
 		}
 		if len(fit) == 0 {
-			return registry.ReplicaRecord{}, &routeError{http.StatusRequestEntityTooLarge, "context_too_long",
+			return registry.ReplicaRecord{}, 0, &routeError{http.StatusRequestEntityTooLarge, "context_too_long",
 				"prompt exceeds the context window of every healthy replica for this model"}
 		}
 
@@ -176,16 +176,16 @@ func (g *gateway) choose(model, policy string, route balancer.RouteRequest, skip
 		for i, r := range fit {
 			cands[i] = balancer.Candidate{ID: r.ReplicaID, Load: r.InFlight, TokPerSec: r.TokPerSec}
 		}
-		idx, err := g.router.Pick(policy, model, cands, route)
+		idx, pred, err := g.router.PickWithPrediction(policy, model, cands, route)
 		if err != nil {
-			return registry.ReplicaRecord{}, &routeError{http.StatusBadRequest, "unknown_routing_policy", err.Error()}
+			return registry.ReplicaRecord{}, 0, &routeError{http.StatusBadRequest, "unknown_routing_policy", err.Error()}
 		}
 		rep := fit[idx]
 		if g.reg.Reserve(rep.ReplicaID) {
-			return rep, nil
+			return rep, pred, nil
 		}
 	}
-	return registry.ReplicaRecord{}, &routeError{http.StatusServiceUnavailable, "no_healthy_worker",
+	return registry.ReplicaRecord{}, 0, &routeError{http.StatusServiceUnavailable, "no_healthy_worker",
 		"replicas for model " + strconv.Quote(model) + " are busy; try again"}
 }
 
@@ -198,8 +198,10 @@ func slotContext(r registry.ReplicaRecord) int {
 
 // forward sends the request to rep and relays the reply. It returns true once
 // the reply has started reaching the client. It returns false only if nothing
-// was written, so the caller may retry.
-func (g *gateway) forward(w http.ResponseWriter, r *http.Request, rep registry.ReplicaRecord, raw []byte, policy, failover string) bool {
+// was written, so the caller may retry. queueMs is how long the request spent
+// in the leader (read, validate, route, reserve) before this dispatch;
+// predictedMs is the TW-LEL estimate for rep, or -1 when not predicted.
+func (g *gateway) forward(w http.ResponseWriter, r *http.Request, rep registry.ReplicaRecord, raw []byte, policy, failover string, queueMs, predictedMs float64) bool {
 	target := strings.TrimSuffix(rep.Endpoint, "/") + "/v1/chat/completions"
 	req, err := postJSON(r.Context(), target, raw)
 	if err != nil {
@@ -229,6 +231,10 @@ func (g *gateway) forward(w http.ResponseWriter, r *http.Request, rep registry.R
 	w.Header().Set("X-Meridian-Worker", rep.ReplicaID)
 	w.Header().Set("X-Meridian-Model", rep.Model)
 	w.Header().Set("X-Meridian-Routing-Policy", policy)
+	w.Header().Set("X-Meridian-Queue-Ms", strconv.FormatFloat(queueMs, 'f', 1, 64))
+	if predictedMs >= 0 {
+		w.Header().Set("X-Meridian-Predicted-Ms", strconv.FormatFloat(predictedMs, 'f', 1, 64))
+	}
 	if failover != "" {
 		w.Header().Set("X-Meridian-Failover", failover)
 	}

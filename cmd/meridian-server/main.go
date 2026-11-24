@@ -11,7 +11,6 @@ import (
 	"github.com/dikshaWagh/meridian/internal/balancer"
 	"github.com/dikshaWagh/meridian/internal/cluster"
 	"github.com/dikshaWagh/meridian/internal/config"
-	"github.com/dikshaWagh/meridian/internal/ml"
 )
 
 func main() {
@@ -41,16 +40,6 @@ func main() {
 		}
 		if err := balancer.Run(cfg.Options); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
-	case "ml-worker":
-		fs := flag.NewFlagSet("ml-worker", flag.ExitOnError)
-		kind := fs.String("kind", "ocr", "worker kind (ocr)")
-		config := fs.String("config", "", "path to the worker JSON config")
-		listen := fs.String("listen", "127.0.0.1:8091", "loopback listen address")
-		fs.Parse(os.Args[2:])
-		if err := ml.RunWorker(*kind, *config, *listen); err != nil {
-			fmt.Fprintln(os.Stderr, "ml-worker error:", err)
 			os.Exit(1)
 		}
 	default:

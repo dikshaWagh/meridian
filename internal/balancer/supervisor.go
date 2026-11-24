@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/dikshaWagh/meridian/internal/api"
-	"github.com/dikshaWagh/meridian/internal/ml"
 	"github.com/dikshaWagh/meridian/internal/webui"
 )
 
@@ -63,9 +62,7 @@ type Options struct {
 	LLMModelName string
 	LLMWorkers   int
 
-	EnableLLM bool   // start the LLM subsystem
-	EnableML  bool   // start the OCR subsystem
-	MLConfig  string // path to ML YAML configuration
+	EnableLLM bool // start the LLM subsystem
 }
 
 func Run(o Options) error {
@@ -83,13 +80,9 @@ func Run(o Options) error {
 	if o.Context <= 0 {
 		o.Context = 8192
 	}
-	if !o.EnableLLM && !o.EnableML {
-		return errors.New("at least one of --enable-llm or --enable-ml must be enabled")
+	if !o.EnableLLM {
+		return errors.New("at least one of --enable-llm must be enabled")
 	}
-	if o.EnableML && o.MLConfig == "" {
-		o.MLConfig = "configs/ml.yaml"
-	}
-	mlGrace := 10 * time.Second
 	if o.EnableLLM {
 		o.ModelsDir, _ = expandHome(o.ModelsDir)
 		exe, _ := os.Executable()
@@ -101,6 +94,7 @@ func Run(o Options) error {
 			return err
 		}
 	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -117,55 +111,14 @@ func Run(o Options) error {
 		llmRT = newLLMRuntime(o, pool)
 	}
 
-	var mlCfg *ml.Config
-	var mlRT *mlRuntime
-	if o.EnableML {
-		var err error
-		mlCfg, err = ml.LoadConfig(o.MLConfig)
-		if err != nil {
-			return err
-		}
-		mlRT = newMLRuntime(mlCfg, ml.Options{})
-		mlGrace = time.Duration(mlCfg.ShutdownGraceSeconds) * time.Second
-	}
-
-	// Start every enabled subsystem directly. There is no exclusive lease:
-	// the LLM pool and OCR workers share the binary and live side by side.
+	// Start every enabled subsystem directly.
 	if llmRT != nil {
 		if err := llmRT.Start(context.Background()); err != nil {
 			return err
 		}
 	}
-	if mlRT != nil {
-		if err := mlRT.Start(context.Background()); err != nil {
-			if llmRT != nil {
-				_ = llmRT.Stop(context.Background())
-			}
-			return err
-		}
-	}
-	if pool != nil {
-		pool.StartHealthChecks(ctx)
-		pool.StartSessionSweeper(ctx)
-	}
 
 	root := http.NewServeMux()
-	if pool != nil {
-		root.Handle("/", NewHandler(pool))
-	} else {
-		root.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-			api.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-		})
-	}
-	// ML endpoints are always registered: in LLM-only deployments they return
-	// a stable service_disabled error instead of a bare 404.
-	ml.RegisterFunc(root, func() *ml.Service {
-		if mlRT == nil {
-			return nil
-		}
-		return mlRT.Current()
-	})
-	root.Handle("GET /v1/catalog", handleCatalog(pool, mlRT))
 
 	var handler http.Handler = withCORS(root)
 	handler = webui.Handler(handler)
@@ -177,33 +130,10 @@ func Run(o Options) error {
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
-	llmState := "disabled"
-	if llmRT != nil {
-		llmState = fmt.Sprintf("%d workers", len(pool.Workers()))
-	}
-	mlState := "disabled"
-	if mlCfg != nil {
-		mlState = "configured"
-	}
-	log.Printf("meridian listening on %s:%d (LAN: %s) llm=%s ml=%s", o.Host, o.Port, lanURL(o.Port), llmState, mlState)
+	log.Printf("meridian listening on %s:%d (LAN: %s) llm=%s", o.Host, o.Port, lanURL(o.Port), "disabled")
 	err := srv.ListenAndServe()
 	stop()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), maxDuration(mlGrace, 60*time.Second))
-	defer cancel()
-	if llmRT != nil {
-		if err := llmRT.Stop(shutdownCtx); err != nil {
-			log.Printf("llm shutdown: %v", err)
-		}
-	}
-	if mlRT != nil {
-		if err := mlRT.Stop(shutdownCtx); err != nil {
-			log.Printf("ml shutdown: %v", err)
-		}
-	}
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
 	return err
 }
 
@@ -221,7 +151,7 @@ func withCORS(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Conversation-ID, X-Meridian-Routing-Policy, X-Request-ID")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Meridian-Worker, X-Meridian-Model, X-Meridian-Routing-Policy")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Meridian-Worker, X-Meridian-Model, X-Meridian-Routing-Policy, X-Meridian-Queue-Ms, X-Meridian-Predicted-Ms")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -242,27 +172,6 @@ func handleSetDefaultPolicy(pool *Pool, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	handlePolicies(pool, w)
-}
-
-func handleCatalog(pool *Pool, mlRT *mlRuntime) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		out := api.CatalogResponse{
-			LLM:                  []api.CatalogModel{},
-			ML:                   []api.CatalogModel{},
-			RoutingPolicies:      []api.RoutingPolicyInfo{},
-			DefaultRoutingPolicy: "",
-		}
-		if pool != nil {
-			out.LLM = pool.ModelCatalog()
-			out.RoutingPolicies = pool.RoutingPolicies()
-			out.DefaultRoutingPolicy = pool.DefaultRoutingPolicy()
-		}
-		if mlRT != nil {
-			out.ML = mlRT.Catalog()
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		api.WriteJSON(w, http.StatusOK, out)
-	}
 }
 
 func expandHome(path string) (string, error) {

@@ -206,9 +206,18 @@ func handleChat(pool *Pool, w http.ResponseWriter, r *http.Request) {
 		r.ContentLength = int64(len(body))
 	}
 
+	queueMs := float64(time.Since(start).Microseconds()) / 1000
+	predictedMs := -1.0
+	if usedPolicy == "token-aware" {
+		predictedMs = PredictMs(worker, route)
+	}
 	w.Header().Set("X-Meridian-Worker", worker.Spec.ID)
 	w.Header().Set("X-Meridian-Model", req.Model)
 	w.Header().Set("X-Meridian-Routing-Policy", usedPolicy)
+	w.Header().Set("X-Meridian-Queue-Ms", strconv.FormatFloat(queueMs, 'f', 1, 64))
+	if predictedMs >= 0 {
+		w.Header().Set("X-Meridian-Predicted-Ms", strconv.FormatFloat(predictedMs, 'f', 1, 64))
+	}
 	w.Header().Set("X-Meridian-Est-Input-Tokens", strconv.Itoa(est.Input))
 	w.Header().Set("X-Meridian-Est-Output-Tokens", strconv.Itoa(est.Output))
 	w.Header().Set("X-Meridian-Est-Total-Tokens", strconv.Itoa(est.Total))

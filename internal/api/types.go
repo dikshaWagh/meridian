@@ -132,7 +132,7 @@ type RoutingPolicyList struct {
 type CatalogModel struct {
 	ID             string `json:"id"`
 	Object         string `json:"object"`
-	Kind           string `json:"kind"` // llm | ocr
+	Kind           string `json:"kind"` // llm
 	State          string `json:"state"`
 	Healthy        bool   `json:"healthy"`
 	Workers        int    `json:"workers,omitempty"`

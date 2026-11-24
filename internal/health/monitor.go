@@ -21,7 +21,10 @@ type Config struct {
 	// SyncLocal copies the leader's own replica state into the registry. It
 	// runs on every health tick. It may be nil.
 	SyncLocal func(now time.Time)
-	Now       func() time.Time
+	// LocalStats samples the leader's own CPU and RAM. Without it the local
+	// node would report zeroes on every tick. It may be nil.
+	LocalStats func() registry.NodeStats
+	Now        func() time.Time
 }
 
 // Monitor expires leases and sweeps stale nodes.
@@ -47,8 +50,17 @@ func (m *Monitor) Tick(now time.Time) {
 	if m.cfg.SyncLocal != nil {
 		m.cfg.SyncLocal(now)
 	}
-	// The local node has no connection to lose, so it stays online.
-	_ = m.reg.UpdateNodeStats(m.cfg.LocalNodeID, registry.NodeStats{At: now})
+	// The local node has no connection to lose, so it stays online. Sample its
+	// real CPU and RAM when the caller provides a sampler; otherwise keep the
+	// old heartbeat-only behaviour.
+	local := registry.NodeStats{At: now}
+	if m.cfg.LocalStats != nil {
+		local = m.cfg.LocalStats()
+		if local.At.IsZero() {
+			local.At = now
+		}
+	}
+	_ = m.reg.UpdateNodeStats(m.cfg.LocalNodeID, local)
 	for _, n := range m.reg.Nodes() {
 		if n.NodeID == m.cfg.LocalNodeID || n.State != registry.NodeOnline {
 			continue

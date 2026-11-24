@@ -81,13 +81,23 @@ func (c *ClusterRouter) Resolve(name string) (string, error) {
 
 // Pick returns the index into cands of the replica to use. req carries the
 // request size for size-aware policies. cands must not be empty.
+// Pick returns the index of the chosen candidate. Use PickWithPrediction when
+// the predicted latency is also needed.
 func (c *ClusterRouter) Pick(policy, model string, cands []Candidate, req RouteRequest) (int, error) {
+	idx, _, err := c.PickWithPrediction(policy, model, cands, req)
+	return idx, err
+}
+
+// PickWithPrediction also returns the TW-LEL predicted completion time in
+// milliseconds for the chosen candidate. It is -1 unless the policy is
+// token-aware and the candidate has valid throughput.
+func (c *ClusterRouter) PickWithPrediction(policy, model string, cands []Candidate, req RouteRequest) (int, float64, error) {
 	name, err := c.Resolve(policy)
 	if err != nil {
-		return -1, err
+		return -1, 0, err
 	}
 	if len(cands) == 0 {
-		return -1, ErrNoHealthyWorker
+		return -1, 0, ErrNoHealthyWorker
 	}
 	workers := make([]*Worker, len(cands))
 	for i, cand := range cands {
@@ -108,9 +118,13 @@ func (c *ClusterRouter) Pick(policy, model string, cands []Candidate, req RouteR
 	}
 	idx, err := strconv.Atoi(w.Spec.ID)
 	if err != nil {
-		return -1, err
+		return -1, 0, err
 	}
-	return idx, nil
+	pred := -1.0
+	if name == "token-aware" {
+		pred = PredictMs(w, req)
+	}
+	return idx, pred, nil
 }
 
 func candidateWorker(index int, cand Candidate) *Worker {
