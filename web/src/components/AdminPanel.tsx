@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError, errorMessage, fetchAdminCluster, setSystemPolicy, streamAdminEvents } from '../api'
+import { useCountUp } from '../hooks/useCountUp'
 import type { AdminCluster, RouteEvent } from '../types'
 import { ClusterGraph, litKeys } from './ClusterGraph'
 
@@ -156,7 +157,7 @@ export function AdminPanel({ token, onExpired }: Props) {
               </option>
             ))}
           </select>
-          {policyInfo && <p className="small policy-desc">{policyInfo.description}</p>}
+          {policyInfo && <p key={cluster.policy} className="small policy-desc">{policyInfo.description}</p>}
           {notice && <p className="small ok-line">{notice}</p>}
           {error && <p className="error-line">{error}</p>}
         </div>
@@ -165,7 +166,7 @@ export function AdminPanel({ token, onExpired }: Props) {
           <div className="stat-grid">
             <Stat label="Nodes online" value={`${stats.nodesOnline}/${stats.nodes}`} />
             <Stat label="Instances ready" value={`${stats.ready}/${stats.replicas}`} />
-            <Stat label="In flight" value={String(stats.inFlight)} />
+            <Stat label="In flight" value={String(stats.inFlight)} live={stats.inFlight > 0} />
             <Stat label="Served" value={String(stats.served)} />
           </div>
         )}
@@ -192,7 +193,12 @@ export function AdminPanel({ token, onExpired }: Props) {
 
         <div className="card log-card">
           <div className="card-label">Routing events</div>
-          {events.length === 0 && <p className="muted small">Waiting for requests…</p>}
+          {events.length === 0 && (
+            <div className="events-empty">
+              <span className="radar" aria-hidden="true"><i /><i /><i /></span>
+              <p className="muted small">Waiting for requests…</p>
+            </div>
+          )}
           <ul className="event-log">
             {events.map((e, i) => (
               <li key={`${e.request_id}-${e.phase}-${i}`} className={`ev ev-${e.phase}`}>
@@ -211,11 +217,30 @@ export function AdminPanel({ token, onExpired }: Props) {
   )
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, live = false }: { label: string; value: string; live?: boolean }) {
+  const parts = value.split('/')
+  const fraction = parts.length === 2 && parts.every((p) => /^\d+$/.test(p))
+  const numeric = /^\d+$/.test(value) ? Number(value) : 0
+  const shown = useCountUp(numeric)
+  const ready = fraction ? Number(parts[0]) : 0
+  const total = fraction ? Number(parts[1]) : 0
+
   return (
-    <div className="stat">
-      <div className="stat-value">{value}</div>
-      <div className="stat-label">{label}</div>
+    <div className={`stat${live ? ' stat-live' : ''}`}>
+      <div className="stat-head">
+        <span className="stat-label mono">{label}</span>
+        <span className="stat-indicator" aria-hidden="true" />
+      </div>
+      <div className="stat-value mono">{fraction ? value : shown}</div>
+      {fraction && total > 0 && total <= 16 ? (
+        <div className="stat-ticks" aria-hidden="true">
+          {Array.from({ length: total }, (_, i) => (
+            <i key={i} className={i < ready ? 'on' : ''} />
+          ))}
+        </div>
+      ) : (
+        <div className="stat-rule" aria-hidden="true" />
+      )}
     </div>
   )
 }

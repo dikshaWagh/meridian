@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react'
 import type { AdminCluster, AdminNode, AdminReplica } from '../types'
 
 // The graph draws the leader at the top and every other node in a row below
@@ -65,10 +66,15 @@ export function ClusterGraph({ cluster, lit, now }: Props) {
     <svg className="graph" viewBox={`0 0 ${WIDTH} ${bottom}`} role="img" aria-label="Cluster routing graph">
       <defs>
         <linearGradient id="gHead" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0" stopColor="var(--accent)" stopOpacity="0.18" />
-          <stop offset="1" stopColor="var(--accent)" stopOpacity="0" />
+          <stop offset="0" stopColor="var(--brand-1)" stopOpacity="0.16" />
+          <stop offset="1" stopColor="var(--brand-1)" stopOpacity="0" />
         </linearGradient>
+        <pattern id="topoDots" width="18" height="18" patternUnits="userSpaceOnUse">
+          <circle cx="1" cy="1" r="0.75" className="topo-dot" />
+        </pattern>
       </defs>
+
+      <rect x="0" y="0" width={WIDTH} height={bottom} fill="url(#topoDots)" aria-hidden="true" />
 
       {leaderBox &&
         boxes.map((b) => {
@@ -78,12 +84,18 @@ export function ClusterGraph({ cluster, lit, now }: Props) {
           const y2 = b.y
           const mid = (y1 + y2) / 2
           const active = isLit(`edge:${b.node.node_id}`)
+          const d = `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`
           return (
-            <path
-              key={`edge-${b.node.node_id}`}
-              className={active ? 'edge lit' : 'edge'}
-              d={`M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`}
-            />
+            <g key={`edge-${b.node.node_id}`}>
+              <path className={active ? 'edge lit' : 'edge'} d={d} />
+              {active && (
+                <circle
+                  className="edge-packet"
+                  r={3.2}
+                  style={{ offsetPath: `path('${d}')` } as CSSProperties}
+                />
+              )}
+            </g>
           )
         })}
 
@@ -107,13 +119,13 @@ function NodeBox({ box, lit }: { box: Box; lit: (key: string) => boolean }) {
   const online = node.state === 'online'
   return (
     <g className={active ? 'node lit' : 'node'}>
-      <rect x={x} y={y} width={w} height={h} rx={16} className="node-body" />
-      <rect x={x} y={y} width={w} height={HEADER} rx={16} className="node-head" />
-      <circle cx={x + 22} cy={y + 24} r={6} className={online ? 'dot dot-ok' : 'dot dot-bad'} />
+      <rect x={x} y={y} width={w} height={h} rx={10} className="node-body" />
+      <rect x={x} y={y} width={w} height={HEADER} rx={10} className="node-head" />
+      <circle cx={x + 22} cy={y + 24} r={5} className={online ? 'dot dot-ok' : 'dot dot-bad'} />
       <text x={x + 36} y={y + 28} className="node-title">
         {node.local ? 'Leader' : 'Worker'} · {node.address}
       </text>
-      <text x={x + 36} y={y + 48} className="node-sub">
+      <text x={x + 36} y={y + 48} className="node-sub mono">
         {node.node_id.slice(0, 12)} · {node.cpu_cores} cores
         {node.ram_total_mb ? ` · RAM ${node.ram_used_mb}/${node.ram_total_mb} MB` : ''}
       </text>
@@ -141,7 +153,8 @@ function ReplicaRow({ rep, x, y, w, lit }: { rep: AdminReplica; x: number; y: nu
   const cls = `rep rep-${rep.healthy ? 'ready' : rep.state}${lit ? ' lit' : ''}`
   return (
     <g className={cls}>
-      <rect x={x} y={y} width={w} height={ROW - 6} rx={8} />
+      <rect x={x} y={y} width={w} height={ROW - 6} rx={6} />
+      <rect x={x} y={y} width={2} height={ROW - 6} className="rep-accent" aria-hidden="true" />
       <text x={x + 10} y={y + 15} className="rep-name">
         {rep.model} #{rep.instance}
       </text>
