@@ -9,3 +9,4 @@ web/dist/
 # built binaries and runtime logs are machine-specific
 bin/
 internal/balancer/logs/
+models/
