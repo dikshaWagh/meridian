@@ -1,335 +1,353 @@
+<div align="center">
+
 # Meridian
 
-Meridian is a self-hosted AI serving platform written in Go. One public HTTP
-server exposes two independent serving subsystems:
+**One private AI cluster from the machines you already own.**
 
-- the **LLM subsystem**: an OpenAI-compatible chat API in front of supervised
-  `llama-server` workers, with session affinity and pluggable L7 routing;
-- the **ML subsystem**: OCR, with its own registry, router, process supervisor,
-  concurrency limits and resource admission control.
+A single Go binary that pools mismatched, unreliable LAN computers into one
+local AI cluster — built for private **LLM chat**, **document extraction**, and
+**OCR** without the cloud, Kubernetes, or a GPU budget.
 
-The two subsystems run concurrently. They share the public listener and nothing
-else: the ML package does not import the LLM pool, and the `protect-llm`
-resource policy has no ability to stop, restart or evict an LLM worker. There is
-no exclusive mode, no lease and no mode switching.
+<br>
 
-A bundled React UI exposes chat, routing-policy selection, model choice and the
-Document Analyzer (OCR).
+![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black)
+![llama.cpp](https://img.shields.io/badge/llama.cpp-local%20inference-111827?style=for-the-badge)
+![OCR](https://img.shields.io/badge/OCR-Tesseract-4B5563?style=for-the-badge)
+![Cloud](https://img.shields.io/badge/cloud-none-16A34A?style=for-the-badge)
+![Status](https://img.shields.io/badge/status-Phase%201%20complete-F59E0B?style=for-the-badge)
 
-Clients (React, `curl`, the stress tool) only ever talk to Meridian. Worker
-listeners are loopback-only.
+<br>
+
+> **Thesis:** Intelligent workload allocation between small and premium models
+> can reduce deployment cost — RAM, latency, energy — without unacceptable
+> quality loss.
+
+</div>
+
+<p align="center">
+  <img src="docs/ui-redesign/01-landing-dark.png" alt="Meridian web UI — landing page in dark mode" width="900">
+</p>
+
+<p align="center">
+  <sub>The embedded React UI: chat, document OCR, and live cluster status in a single binary.</sub>
+</p>
+
+---
+
+## ✦ Why Meridian exists
+
+Colleges, clinics, small offices, and home labs need private document and LLM
+processing. They cannot leak data to the cloud, cannot justify a $2,000/month
+GPU, and are often air-gapped. What they *do* have is a room full of idle,
+mismatched PCs.
+
+Standard serving tools fail this environment in three ways:
+
+| Problem | What goes wrong |
+|---|---|
+| **Workload blindness** | `round-robin` and `least-connections` treat a 50-token `hi` and a 4,000-token document as one connection — and an 8 tok/s CPU the same as a 55 tok/s GPU. |
+| **Node fragility** | Lab PCs sleep, disconnect, and crash mid-chat. Without health breakers, replay, and session migration, workflows break. |
+| **Cost blindness** | Cloud routers optimise `tokens × price`. Locally the price is zero; the real costs are **RAM-seconds, latency, and energy**. |
+
+Meridian is built for the opposite assumptions: **heterogeneous hardware,
+unreliable nodes, zero cloud, and a human who needs an answer now.**
+
+---
+
+## ✦ What it does
+
+| | |
+|---|---|
+| **Token-aware routing** | Every request goes to the worker with the lowest predicted finish time, using measured throughput, in-flight load, and the request's estimated input/output size. |
+| **Fault tolerance** | A three-state health FSM, atomic reservations, session migration, one retry before headers, and supervised worker restarts with backoff. |
+| **Single-binary gateway** | The Go gateway embeds the React UI. `meridian-stress` is a separate profiler. No Python, no Kubernetes, no external database. |
+| **LLM + OCR together** | `llama-server` chat and `tesseract` OCR run concurrently under `/proc/meminfo` RAM admission. |
+| **Fixed-leader cluster** | The first node in `cluster.yaml` is the leader. It heartbeats LAN workers and balances across local and remote nodes — no election, no Raft, no gossip. |
+| **Honest observability** | `/status` exposes in-flight work, estimated tokens, measured tok/s, hosts, and sessions. JSONL logs contain no prompts, images, or OCR text. |
+
+<p align="center">
+  <img src="docs/ui-redesign/16-split-dark.png" alt="Meridian split view — chat and live worker status side by side" width="900">
+</p>
+
+<p align="center">
+  <sub>Chat and cluster telemetry side by side — including the routing policy in effect.</sub>
+</p>
+
+---
+
+## ✦ Architecture
+
+```mermaid
+flowchart LR
+    C[Clients<br/>browser · curl · stress] --> G
+
+    subgraph Leader["Meridian Gateway · fixed leader · :8080"]
+        G[HTTP API + embedded UI]
+        H[Health FSM<br/>heartbeat every 2 s]
+        R[Token-aware router<br/>TW-LEL]
+        S[Session store<br/>sticky + migration]
+        A[Atomic reservations]
+        G --> H --> R --> A
+        R --> S
+    end
+
+    R --> L1[llama-server<br/>small model]
+    R --> L2[llama-server<br/>premium model]
+    R --> W1[Remote LAN worker<br/>llama-server]
+    G --> O[OCR worker<br/>tesseract]
+
+    W1 -.->|GET /health| H
+    L1 -.->|GET /health| H
+    L2 -.->|GET /health| H
+```
+
+- **Clients talk only to the leader.** Workers are stateless and answer `/health`.
+- **Inference takes 35 s; the gateway takes <1 ms.** At LAN scale the leader is never the bottleneck.
+- **Remote nodes run `llama-server` only.** No Meridian agent is installed on them.
+- **Leader loss is documented, not hidden.** Models keep running; in-memory sessions are lost; recovery is a manual restart on the same or a standby machine.
+
+### The routing score
+
+For every healthy worker, Meridian computes a predicted finish time and picks
+the lowest:
 
 ```text
-client -> meridian-server :8080
-             |
-             +-- LLM subsystem ---> llama-server workers :8081..
-             |     handler / pool / routing / sessions / supervisor
-             |
-             +-- ML subsystem  ---> Go OCR worker :8091
-                   handler / registry / router / supervisor / resource manager
+C_w = (F_w · (I + Ō) + I + O) / R_w
 ```
 
-## Layout
+| Symbol | Meaning |
+|---|---|
+| `F_w` | In-flight plus reserved requests on worker `w` |
+| `I` | Estimated input tokens, including stored session history |
+| `O` | Requested output tokens (`max_tokens`, or 128) |
+| `Ō` | Per-model mean completed output tokens (128 before any data) |
+| `R_w` | Measured throughput in tokens/second |
 
-```text
-cmd/
-  meridian-server/    server CLI: LLM balancer + ML control plane + workers
-  meridian-stress/    LLM load generator
-internal/
-  api/                shared request/response JSON types
-  balancer/           LLM handler, pool, routing, sessions, supervisor, workers
-  ml/                 independent ML config, registry, router, supervisor,
-                      resource admission, OCR backend and public API
-  metrics/            JSONL request metrics (LLM and ML)
-  tokens/             rough token estimator
-  webui/              embedded production build of the React app
-web/                  React 19 + TypeScript + Vite source for the web UI
-configs/ml.yaml       sample OCR configuration (fake engine, runnable anywhere)
-configs/laptop-real.yaml  OCR configuration using the tesseract CLI
-```
+A worker is excluded when `I + O` exceeds its per-slot context
+(`ctx / parallel`). If no worker fits, the gateway returns
+`413 context_too_long`.
 
-## Build
+> **Known limitation:** this is a whiteboard-explainable heuristic, not an exact
+> queueing model. It assumes queued requests are as large as the new one, and
+> that input and output tokens cost the same. Continuous batching means
+> throughput does not fall linearly with load.
+
+---
+
+## ✦ Quickstart
+
+**Requirements:** Go 1.22+, a `llama-server` binary, and GGUF model files.
+Node 18+ is needed only when rebuilding the web UI. Tesseract is optional.
 
 ```bash
-# production web assets (embedded into the server binary)
-npm --prefix web install
-npm --prefix web run build
-
-go build ./...
-go build -o bin/meridian-server ./cmd/meridian-server
-go build -o bin/meridian-stress ./cmd/meridian-stress
+# from the repository root
+make build      # web UI + meridian-server + meridian-stress
+# or
+make server     # use the committed web build, skip Node
 ```
 
-Or `make build`, which builds the web app first. The committed
-`internal/webui/dist` lets `go build ./...` work without Node; rebuild it after
-changing anything under `web/src`.
-
-Go 1.22+ is required. The only added Go module is `gopkg.in/yaml.v3` for the ML
-configuration. The web app uses Node 18+.
-
-### Web UI development
+### Single machine — Phase 1
 
 ```bash
-# terminal 1
-./bin/meridian-server serve --enable-ml=true --ml-config ./configs/ml.yaml \
-  --models-dir ~/models --llama-bin llama-server
-
-# terminal 2: Vite dev server on :5173, proxying /v1 and /ml to :8080
-npm --prefix web run dev
+./bin/meridian-server serve \
+  --llm qwen2.5-0.5b-instruct-q4_k_m.gguf:2 \
+  --llm qwen2.5-3b-instruct-q4_k_m.gguf:1 \
+  --llama-bin /usr/local/lib/ollama/llama-server \
+  --models-dir ~/meridian/models \
+  --threads 8 --ctx 4096 --host 0.0.0.0 --port 8080 \
+  --ram-headroom-mb 256 --routing-policy token-aware
 ```
 
-`npm --prefix web run typecheck` runs `tsc --noEmit`. Production builds are
-written directly to `internal/webui/dist` and served from `/` by the Go server;
-`/v1/*` and `/ml/*` are never shadowed by the SPA fallback.
+The number after `:` is the instance count. Preflight rejects the start if
+`instances × model size + headroom` exceeds `MemAvailable`.
 
-## Deployment modes
+Open **<http://localhost:8080>** for the embedded UI.
 
-LLM serving is on by default; ML (OCR) serving is opt-in. Both can run at the
-same time, limited only by the configured resource budgets.
+### Fixed leader + LAN workers — Phase 3
+
+Once Phase 3 lands, the leader and a sub-node are configured like this:
 
 ```bash
-# LLM only (default)
-./bin/meridian-server serve --enable-llm=true --enable-ml=false
-
-# OCR only
-./bin/meridian-server serve --enable-llm=false --enable-ml=true \
-  --ml-config ./configs/ml.yaml
-
-# Both, resident concurrently
-./bin/meridian-server serve --enable-llm=true --enable-ml=true \
-  --ml-config ./configs/ml.yaml
+# Leader: the first node listed in configs/cluster.yaml
+./bin/meridian-server serve --cluster-config configs/cluster.yaml
 ```
-
-Disabling both fails startup with a configuration error. `--enable-llm=false`
-does not run preflight checks or spawn LLM workers; `--enable-ml=false` does not
-load ML configuration or spawn ML workers. In an LLM-only deployment the ML
-endpoints stay mounted and return `503 service_disabled`.
-
-### Run against real LLM workers
-
-Meridian has no simulated LLM worker. Point it at a `llama-server` binary and a
-directory of GGUF files (the six files named in `internal/balancer/workers.go`),
-or serve a single file with `--llm-model`:
 
 ```bash
-./bin/meridian-server serve --enable-llm=true --enable-ml=false \
-  --models-dir ~/models --llama-bin llama-server
-
-# or one model file
-./bin/meridian-server serve --llm-model ~/models/Qwen3-4B-Q4_K_M.gguf \
-  --llm-model-name qwen3-4b --llm-workers 2
+# Sub-node: llama-server only, no Meridian agent
+llama-server --host 0.0.0.0 --port 8081 \
+  -m model.gguf --alias MODEL -t 4 -c 4096 -np 2
 ```
 
-Open <http://localhost:8080> for the web UI.
+A remote worker failure is detected in roughly **6 seconds** (3 × 2 s probes).
+The same token-aware policy sees local and remote workers identically.
 
-## Web UI
-
-The bundled React app is a single-page client for the whole server:
-
-- **Chat** — streamed OpenAI-style chat with a model picker, routing-policy
-  picker, per-conversation history and Markdown rendering. History is sent with
-  every request (stateless client).
-- **Documents** — the Document Analyzer: drop a PNG/JPEG, send it to `/v1/ocr`,
-  and read or copy the extracted text.
-- Chat and Documents are local tabs; both subsystems can serve requests at the
-  same time.
-- Light/dark appearance, glassy panels and an Apple-style blue accent, with no
-  UI framework beyond React.
-
-The app is built into `internal/webui/dist` and embedded with
-`//go:embed all:dist`, so a single binary serves both the API and the UI.
-
-## LLM subsystem
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/v1/chat/completions` | OpenAI-style chat completion |
-| `GET` | `/v1/models` | LLM models with at least one healthy worker |
-| `GET` | `/status` | Per-worker LLM status |
-| `GET` | `/policies` | Routing policies |
-| `PUT` | `/v1/policies/default` | Change the default policy at runtime |
-| `GET` | `/healthz` | Liveness |
-
-Routing policies are `round-robin` (default), `random` and `least-connections`.
-Sessions are sticky: the policy runs only when a worker is chosen (new
-conversation or failover). `X-Conversation-ID` provides per-conversation
-affinity and `409 conversation_busy` enforces one in-flight request per
-conversation. `X-Meridian-Routing-Policy` pins a single request to a policy, and
-`PUT /v1/policies/default` with `{"name":"least-connections"}` changes the
-server default. Set `"stream": true` on `/v1/chat/completions` for OpenAI-style
-SSE deltas.
-
-See the existing flags (`--models-dir`, `--llama-bin`, `--threads`, `--ctx`,
-`--parallel`, `--ngl`, `--gpu-workers`, `--backend-lib`, `--gpu-device`,
-`--routing-policy`); their meaning is unchanged. `--llm-model`,
-`--llm-model-name` and `--llm-workers` select a single GGUF file instead of the
-built-in worker set. Every LLM worker is a real `llama-server` process; there is
-no simulated worker.
-
-## ML subsystem (OCR)
-
-### Configuration
-
-Start from [`configs/ml.yaml`](configs/ml.yaml):
-
-```yaml
-listen_host: 127.0.0.1          # ML workers are loopback-only
-resource_policy: protect-llm    # the only supported policy
-
-resources:
-  ram_headroom_mb: 1024
-  vram_headroom_mb: 1024
-  protected_llm_vram_mb: 1024
-  gpu_probe: auto               # auto | off
-shutdown_grace_seconds: 10      # drain in-flight OCR requests before SIGTERM
-
-ocr:
-  enabled: true
-  model_id: pp-ocrv5-mobile-en
-  engine: fake                  # fake | tesseract
-  device: cpu
-  model_dir: ./models/ocr/pp-ocrv5-mobile-en
-  expected_ram_mb: 256
-  expected_vram_mb: 0
-  concurrency: 2
-  port: 8091
-  max_upload_mb: 10
-  startup_timeout_seconds: 60
-```
-
-The sample runs on any machine because it selects the deterministic `fake`
-engine. `configs/laptop-real.yaml` switches to `engine: tesseract`, which shells
-out to the `tesseract` binary on `PATH`. Unknown engines are rejected at
-startup. Memory budgets are declared estimates used only for admission; they are
-not inferred from model file size. Configuration is validated at startup
-(unknown engines, duplicate/invalid ports, non-loopback bind addresses, negative
-budgets, invalid limits and unknown fields are rejected). A missing model file
-or missing native library blocks only that ML worker and never crashes an
-LLM-only deployment.
-
-### Public API
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/v1/ocr` | OCR one PNG/JPEG image |
-| `GET` | `/v1/ml/models` | Configured ML models and states |
-| `GET` | `/ml/status` | ML workers + resource admission details |
-
-`/v1/models` stays LLM-only for compatibility. In LLM-only deployments the ML
-endpoints remain mounted but return `503 service_disabled` (a stable error
-contract rather than a bare 404).
-
-#### OCR
+### Benchmark it
 
 ```bash
-curl -F file=@document.png -F model=pp-ocrv5-mobile-en \
-  http://localhost:8080/v1/ocr
+./bin/meridian-stress \
+  --addr http://127.0.0.1:8080 \
+  --concurrency 6 \
+  --conversations-per-model 20
+
+curl http://127.0.0.1:8080/status
 ```
 
-```json
-{
-  "request_id": "…",
-  "model": "pp-ocrv5-mobile-en",
-  "text": "…",
-  "lines": [{"text": "…"}],
-  "processing_ms": 42
-}
-```
-
-`confidence` and `bbox` are omitted unless the backend computes them; they are
-never fabricated.
-
-#### Error contract
-
-`invalid_request` (400), `model_not_found` (404), `request_too_large` (413),
-`service_disabled` / `no_healthy_worker` / `insufficient_resources` /
-`worker_start_failed` (503), `inference_timeout` (504), `upstream_error` (502).
-
-### Worker lifecycle and supervision
-
-`meridian-server ml-worker --kind ocr --config <json>` runs as a child process of
-the server (a self re-exec pattern; the same binary in worker mode). The worker:
-
-- loads exactly one model/backend before reporting ready;
-- exposes private `/health`, `/ready`, and a typed inference endpoint on
-  loopback only;
-- bounds request bodies, image dimensions and concurrency;
-- exits non-zero on initialisation failure.
-
-The parent tracks PID, model, kind, port, state, last check/error, in-flight
-requests, served/failed counts, restarts and last inference duration. States are
-`starting`, `ready`, `unhealthy`, `resource_blocked`, `stopping`, `exited`.
-
-Restart policy is bounded: a worker that was ready and then crashes is restarted
-at most twice with backoff; a worker that fails initialisation (missing model,
-missing native library, port conflict) is left `exited` and is never
-restart-looped. Health is probed every 2 seconds; three consecutive failures
-mark a worker unhealthy.
-
-### Resource admission (`protect-llm`)
-
-Before an ML worker starts, the resource manager takes a host snapshot
-(`/proc/meminfo`, optional `nvidia-smi`) and reserves the configured RAM, VRAM
-and inference overhead. Admission is serialized so concurrent startups cannot
-oversubscribe the same capacity. Reservations are released when a worker stops
-or fails.
-
-- Unknown VRAM is **not** treated as unlimited: GPU-backed models stay
-  `resource_blocked` until a probe and budget are available.
-- A rejected model does not start; other ML models and all LLM workers continue.
-- The manager has no kill/eviction API, so the default policy structurally
-  cannot stop an LLM worker to admit an ML model.
-
-Memory snapshots are estimates and can become stale; reservations reduce the
-risk of oversubscription but cannot guarantee the OS or GPU driver will never
-run out of memory.
-
-### OCR backends
-
-```go
-type OCRBackend interface {
-    Recognize(ctx context.Context, imageBytes []byte) (*OCRResult, error)
-    Close() error
-}
-```
-
-Two engines are compiled in:
-
-- `fake` — deterministic output, no external dependencies; used by
-  `configs/ml.yaml`.
-- `tesseract` — runs the Tesseract CLI (`tesseract`) over a temporary image
-  file; used by `configs/laptop-real.yaml`.
-
-## Metrics
-
-- LLM: `logs/requests.jsonl` (unchanged format).
-- ML: `logs/ml-requests.jsonl` — `request_id`, `kind`, `model`, `status_code`,
-  `latency_ms`, optional `error_type`, and a `service: "meridian-ml"` namespace.
-  Images and OCR text are never logged.
-
-## Tests
+### Verify the build
 
 ```bash
-go build ./...
 go test ./...
 go vet ./...
 go test -race ./internal/balancer ./internal/ml
 npm --prefix web run typecheck
 ```
 
-The ML suite covers configuration validation, the OCR API, invalid MIME,
-malformed and oversized uploads, disabled-service behavior, worker
-readiness/health, initialisation failure without restart loops, port conflicts,
-concurrency limits, resource admission (including "unknown VRAM is not
-unlimited"), and the protect-llm invariant. No test needs model weights or a
-GPU.
+---
 
-## Current limitations
+## ✦ API surface
 
-- Static LLM worker list; one ML worker per configured model.
-- No authentication or TLS.
-- In-memory LLM sessions (lost on restart); OCR requests are stateless.
-- Approximate LLM token counting.
-- Metrics are file-based only.
-- The `fake` engine is fully functional; `tesseract` requires the CLI on
-  `PATH`.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/v1/chat/completions` | OpenAI-compatible chat, streaming or not |
+| `GET` | `/v1/models` | Models with at least one healthy worker |
+| `GET` | `/status` | Per-worker load, tok/s, host, sessions |
+| `GET` | `/policies` | Available routing policies |
+| `PUT` | `/v1/policies/default` | Change the default policy at runtime |
+| `GET` | `/healthz` | Liveness |
+| `GET` | `/v1/catalog` | Model catalog |
+| `POST` | `/v1/ocr` | OCR one PNG/JPEG image |
+| `GET` | `/ml/status` | OCR state and RAM admission |
+| `POST` | `/v1/document/analyze` | OCR → LLM extraction _(Phase 3, if built)_ |
+
+**Useful headers:** `X-Conversation-ID` for session affinity,
+`X-Meridian-Routing-Policy` to pin a single request, and
+`X-Meridian-Failover` for failover behaviour.
+
+Policies: `round-robin`, `random`, `least-connections`, `token-aware`.
+`cost-aware` is planned for Phase 2.
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-Conversation-ID: demo-1' \
+  -d '{"model":"qwen2.5-0.5b","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+---
+
+## ✦ Roadmap
+
+| Phase | Focus | Status |
+|:---:|---|---|
+| **0** | Trim the fat — remove arbiter/SD/stubs, keep LLM + OCR, green build | ✅ Complete |
+| **1** | Single-machine fault tolerance — kill a worker, chats continue | ✅ Complete |
+| **2** | Small vs premium routing — `complexity.go`, `cost_aware.go`, cost/quality proof | ⏳ Next |
+| **3** | Fixed leader + LAN workers — heartbeat and balance remote nodes | ◻ Planned |
+| **4** | Evidence — experiments, graphs, pitch, report | ◻ Planned |
+
+**Current status:** Phase 1 is implemented. Token-aware routing (`TW-LEL`) is
+implemented, tested, and visualised in the UI. Worker heartbeats and local load
+balancing already exist. `complexity.go` and `cost_aware.go` are not built yet;
+Phase 2 benchmarks remain to be run. Phase 3 extends the existing heartbeat and
+balancer to remote workers — it adds no election.
+
+---
+
+## ✦ Design decisions, viva-ready
+
+| Decision | Rationale |
+|---|---|
+| **Fixed leader, no consensus** | With one leader and 2–5 nodes, Raft or gossip costs more than it gains. The failure mode is simple to explain and simple to recover. |
+| **Multiple instances of small models** | A 0.5–1.5B model may run twice under RAM admission: full context each, crash isolation, independent scheduling. Large models use one instance with `-np` slots. |
+| **Session stickiness** | A conversation stays on its worker while healthy; on failure it migrates and the client resends history. |
+| **Atomic reservations** | Capacity is reserved before forwarding, so concurrent requests cannot oversubscribe a worker. |
+| **Supervised restarts** | A crashed `llama-server` restarts with exponential backoff (1 s → 30 s), up to 5 consecutive failures. A run lasting ≥1 minute resets the counter. |
+| **RAM admission** | `/proc/meminfo` headroom is checked before starting workers. Preflight refuses configurations that would overcommit the host. |
+| **Zero-PII logs** | Metrics capture latency, tokens, worker, and status — never prompts, images, or OCR text. |
+
+### Small vs premium (Phase 2, planned)
+
+- **Tiers:** `qwen2.5-0.5b` (fast, cheap) vs `qwen2.5-1.5b/3b` (quality).
+- **Classifier:** input >1,500 tokens or keywords such as `summarize`, `extract`,
+  `code`, `invoice` → premium; otherwise small. Default small, escalate on
+  `413` or empty output.
+- **Score:** `EstimatedWait + λ × premiumPenalty` — one tunable,
+  whiteboard-explainable rule.
+- **Cost:** RAM-GB × seconds. **Quality proxy:** 1–5 manual rating on 20 fixed
+  prompts.
+
+---
+
+## ✦ Known limitations
+
+Meridian is deliberately honest about what it does not do:
+
+- No authentication or TLS — **trusted LAN only**.
+- The fixed leader is a single point of failure; recovery is a manual restart.
+- No node-level heartbeat yet, so `/status` cannot distinguish “machine off”
+  from “`llama-server` crashed”.
+- Sessions are in memory and lost on leader restart.
+- Token estimates are approximate (~4 characters/token).
+- Token-aware routing is a heuristic, not an exact queueing model.
+- Streams cannot resume mid-token; the next turn reroutes with history intact.
+- No image generation, fine-tuning, cloud APIs, or multi-GPU clusters.
+- Phase 2 small-vs-premium routing and cost-aware scheduling are not built yet.
+
+---
+
+## ✦ Repository layout
+
+```text
+cmd/
+  meridian-server/   Gateway (serve | ml-worker) — leader
+  meridian-stress/   p50/p95/p99, tok/s, fault injection
+internal/
+  api/               OpenAI-compatible + worker contracts
+  balancer/          pool, session, routing, handler, supervisor
+                     token_aware.go · stream_usage.go
+                     + cost_aware.go, complexity.go   (Phase 2)
+  tokens/            O(n) estimator (~4 chars/token)
+  ml/                OCR supervisor, tesseract/fake, RAM admission
+  metrics/           JSONL telemetry — no PII
+  webui/             go:embed all:dist
+web/                 React 19 + TypeScript + Vite
+configs/
+  ml.yaml            fake OCR (tests)
+  laptop-real.yaml   real tesseract OCR
+  cluster.yaml       Phase 3 worker list (leader = first node)
+docs/
+  00-overview-and-roadmap.md
+  01-phase-0-trim-the-fat.md
+  02-phase-1-single-machine-fault-tolerance.md
+  03-phase-2-intelligent-workload-allocation.md
+  04-phase-3-leader-multi-node-distribution.md
+  05-phase-4-test-pitch-and-report.md
+  archive/           superseded audits and implementation notes
+```
+
+---
+
+## ✦ Documentation
+
+| Document | What it covers |
+|---|---|
+| [`docs/00-overview-and-roadmap.md`](docs/00-overview-and-roadmap.md) | Product claim and phase order — read first |
+| [`docs/01-phase-0-trim-the-fat.md`](docs/01-phase-0-trim-the-fat.md) | Phase 0 deletions and acceptance criteria |
+| [`docs/02-phase-1-single-machine-fault-tolerance.md`](docs/02-phase-1-single-machine-fault-tolerance.md) | Fault tolerance acceptance criteria |
+| [`docs/03-phase-2-intelligent-workload-allocation.md`](docs/03-phase-2-intelligent-workload-allocation.md) | Small vs premium routing |
+| [`docs/04-phase-3-leader-multi-node-distribution.md`](docs/04-phase-3-leader-multi-node-distribution.md) | Fixed leader + LAN workers |
+| [`docs/05-phase-4-test-pitch-and-report.md`](docs/05-phase-4-test-pitch-and-report.md) | Experiments, graphs, pitch |
+| [`docs/project-report.md`](docs/project-report.md) | Full project report |
+| [`docs/spec-leader-worker-cluster.md`](docs/spec-leader-worker-cluster.md) | Leader/worker protocol specification |
+| [`docs/deployment.md`](docs/deployment.md) | Deployment notes |
+| [`docs/ui-redesign/REPORT.md`](docs/ui-redesign/REPORT.md) | UI redesign report and screenshots |
+
+---
+
+<div align="center">
+
+**Meridian** — because the fastest AI cluster is the one already sitting in the room.
+
+<sub>Built with Go, React, llama.cpp, and Tesseract. No cloud required.</sub>
+
+</div>
